@@ -14,7 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 
 MAX_CSV_FILE_SIZE: Final = 5 * 1024 * 1024  # 5 MB
 MAX_CSV_ROWS: Final = 10000
-MAX_CSV_COLS: Final = 10
+MAX_CSV_COLS: Final = 50
 MAX_CELL_LENGTH: Final = 128
 
 ALLOWED_CSV_FILES: Final[Set[str]] = {
