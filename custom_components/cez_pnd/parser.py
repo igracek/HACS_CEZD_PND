@@ -583,6 +583,7 @@ class PndCsvParser:
         basename = os.path.basename(file_path)
         row_stream = self._stream_csv_rows(file_path)
         last_valid_result: Optional[Tuple[datetime, float]] = None
+        daily_accum: Dict[Any, Tuple[datetime, float]] = {}
 
         date_col_idx = 0
         value_col_idx = 1
@@ -674,8 +675,20 @@ class PndCsvParser:
 
             start_time, _ = parse_cez_datetime(date_str)
             raw_val = parse_float_value(val_str)
-            total_kwh = round(raw_val * unit_scale, 4)
-            last_valid_result = (start_time, total_kwh)
+            row_kwh = round(raw_val * unit_scale, 4)
+
+            # Accumulate sum per day to support single-day totals, multi-day exports, and multi-row interval exports
+            date_key = start_time.date()
+            if date_key not in daily_accum:
+                daily_accum[date_key] = (start_time, 0.0)
+            st_prev, sum_prev = daily_accum[date_key]
+            # If date_str specifies a full day (without interval minutes), row_kwh is the full day's value
+            # If date_str has interval time (15-min), accumulate them
+            daily_accum[date_key] = (start_time, round(sum_prev + row_kwh, 4))
+
+        if daily_accum:
+            latest_date = max(daily_accum.keys())
+            last_valid_result = daily_accum[latest_date]
 
         return last_valid_result
 

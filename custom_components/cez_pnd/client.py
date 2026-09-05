@@ -1125,12 +1125,13 @@ class PndScraperClient:
         self._verify_origin(driver, state=ORIGIN_STATE_APP, expected_path_prefix=APP_PATH_PREFIX)
         wait = WebDriverWait(driver, 10)
 
-        # Open 'Export' or 'Rychlá sestava' window if required
+        # Ensure window is in 'Tabulka dat' mode so interval profiles (01, 02) are active
         try:
             window = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".pnd-window")))
-            export_btn = window.find_element(By.XPATH, ".//button[@title='Export']")
-            export_btn.click()
-            time.sleep(1)
+            tab_btn = window.find_element(By.XPATH, ".//button[@title='Tabulka dat']")
+            if "active" not in (tab_btn.get_attribute("class") or ""):
+                tab_btn.click()
+                time.sleep(1)
         except Exception:
             pass
 
@@ -1332,7 +1333,17 @@ class PndScraperClient:
             self._check_deadline_and_stop(driver, proc, stop_event, deadline)
             wait = WebDriverWait(driver, 10)
 
-            # 1. Select 'Včera' in 'Období'
+            # 1. Ensure window is in 'Tabulka dat' mode
+            try:
+                win = driver.find_element(By.CSS_SELECTOR, ".pnd-window")
+                tab_btn = win.find_element(By.XPATH, ".//button[@title='Tabulka dat']")
+                if "active" not in (tab_btn.get_attribute("class") or ""):
+                    tab_btn.click()
+                    time.sleep(1)
+            except Exception:
+                pass
+
+            # 2. Select 'Včera' in 'Období'
             try:
                 dropdown_label = wait.until(
                     EC.element_to_be_clickable((By.XPATH, "//label[contains(text(), 'Období')]"))
@@ -1354,37 +1365,16 @@ class PndScraperClient:
             except Exception as err:
                 raise PndScraperError("Failed to select 'Včera' period (ERR_SCRAPER)") from err
 
-            # 2. Click 'Vyhledat data'
+            # 3. Click 'Vyhledat data'
             self._click_search_data(driver, proc=proc, stop_event=stop_event, deadline=deadline)
 
-            # 3. Download Daily Consumption (+A)
-            daily_cons = self._download_report_by_name(
-                driver, download_dir, ["07 Profil spotřeby za den (+A)", "07 Profil spotřeby", "17 Registry za den (+E, -E)", "17 Registry za den"], "daily-consumption.csv",
-                proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-            )
-
-            # 4. Download Daily Production (-A)
-            daily_prod = ""
-            try:
-                daily_prod = self._download_report_by_name(
-                    driver, download_dir, ["08 Profil výroby za den (-A)", "08 Profil výroby"], "daily-production.csv",
-                    proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-                )
-            except PndScraperError as err:
-                _LOGGER.info("Daily production report not available for this EAN (consumption-only): %s", err)
-
-            # 5. Switch to 'Vlastní období' or interval view for range 15min data
-            yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
-            yesterday_range = f"{yesterday_str} - {yesterday_str}"
-            self._set_custom_date_range(driver, yesterday_range, proc=proc, stop_event=stop_event, deadline=deadline)
-
-            # 6. Download 15-min interval range consumption
+            # 4. Download 15-min interval range consumption (+A)
             range_cons = self._download_report_by_name(
                 driver, download_dir, ["01 Profil spotřeby (+A)", "01 Profil spotřeby", "Profil spotřeby (+A)"], "range-consumption.csv",
                 proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
             )
 
-            # 7. Download 15-min interval range production
+            # 5. Download 15-min interval range production (-A) (optional for consumption-only EANs)
             range_prod = ""
             try:
                 range_prod = self._download_report_by_name(
@@ -1393,6 +1383,26 @@ class PndScraperClient:
                 )
             except PndScraperError as err:
                 _LOGGER.info("Range production report not available for this EAN (consumption-only): %s", err)
+
+            # 6. Download Daily Consumption (+A)
+            daily_cons = ""
+            try:
+                daily_cons = self._download_report_by_name(
+                    driver, download_dir, ["07 Profil spotřeby za den (+A)", "07 Profil spotřeby", "17 Registry za den (+E, -E)", "17 Registry za den"], "daily-consumption.csv",
+                    proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
+                )
+            except Exception as err:
+                _LOGGER.info("Daily summary report download note: %s", err)
+
+            # 7. Download Daily Production (-A) (optional)
+            daily_prod = ""
+            try:
+                daily_prod = self._download_report_by_name(
+                    driver, download_dir, ["08 Profil výroby za den (-A)", "08 Profil výroby"], "daily-production.csv",
+                    proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
+                )
+            except Exception as err:
+                _LOGGER.info("Daily production report not available for this EAN (consumption-only): %s", err)
 
             # SEC10-02 (CWE-252, CWE-682): Validate mandatory interval reports
             if not range_cons or not os.path.isfile(range_cons) or os.path.getsize(range_cons) == 0:
@@ -1447,10 +1457,14 @@ class PndScraperClient:
                 driver, download_dir, ["01 Profil spotřeby (+A)", "01 Profil spotřeby", "Profil spotřeby (+A)"], "range-consumption.csv",
                 proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
             )
-            range_prod = self._download_report_by_name(
-                driver, download_dir, ["02 Profil výroby (-A)", "02 Profil výroby", "Profil výroby (-A)"], "range-production.csv",
-                proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-            )
+            range_prod = ""
+            try:
+                range_prod = self._download_report_by_name(
+                    driver, download_dir, ["02 Profil výroby (-A)", "02 Profil výroby", "Profil výroby (-A)"], "range-production.csv",
+                    proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
+                )
+            except PndScraperError as err:
+                _LOGGER.info("Range production report not available for this EAN (consumption-only): %s", err)
 
             # SEC10-02 (CWE-252, CWE-682): Validate mandatory historical report downloads
             if not range_cons or not os.path.isfile(range_cons) or os.path.getsize(range_cons) == 0:
@@ -1460,7 +1474,7 @@ class PndScraperClient:
 
             return {
                 "range_consumption": range_cons,
-                "range_production": range_prod,
+                "range_production": range_prod or "",
             }
         except Exception as err:
             _LOGGER.error("Error during custom range scraping: %s", type(err).__name__)
@@ -1490,6 +1504,16 @@ class PndScraperClient:
         self._check_deadline_and_stop(driver, proc, stop_event, deadline)
         self._verify_origin(driver, state=ORIGIN_STATE_APP, expected_path_prefix=APP_PATH_PREFIX)
         wait = WebDriverWait(driver, 10)
+
+        # Ensure window is in 'Tabulka dat' mode
+        try:
+            win = driver.find_element(By.CSS_SELECTOR, ".pnd-window")
+            tab_btn = win.find_element(By.XPATH, ".//button[@title='Tabulka dat']")
+            if "active" not in (tab_btn.get_attribute("class") or ""):
+                tab_btn.click()
+                time.sleep(1)
+        except Exception:
+            pass
 
         # Select 'Vlastní' or 'Vlastní období' in 'Období'
         dropdown_label = wait.until(
@@ -1614,15 +1638,28 @@ class PndScraperClient:
                 except Exception:
                     pass
 
-        # Click 'Exportovat data' -> 'CSV'
+        # Click 'Exportovat data' -> 'CSV' scoped to the link's window container
         try:
+            container = None
+            try:
+                container = link.find_element(By.XPATH, "./ancestor::div[contains(@class, 'pnd-window')]")
+            except Exception:
+                pass
+
             toggle_xpath = (
-                "//button[contains(., 'Exportovat data')] | //button[contains(., 'Exportovat')]"
-                " | //button[contains(., 'Export')] | //a[contains(., 'Exportovat data')]"
+                ".//button[contains(., 'Exportovat data')] | .//button[contains(., 'Exportovat')]"
+                " | .//button[contains(., 'Export')] | .//a[contains(., 'Exportovat data')]"
             )
-            toggle_button = wait.until(
-                EC.presence_of_element_located((By.XPATH, toggle_xpath))
-            )
+            toggle_button = None
+            if container is not None:
+                try:
+                    toggle_button = container.find_element(By.XPATH, toggle_xpath)
+                except Exception:
+                    pass
+            if toggle_button is None:
+                toggle_button = wait.until(
+                    EC.presence_of_element_located((By.XPATH, "//" + toggle_xpath[2:]))
+                )
             try:
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", toggle_button)
                 time.sleep(0.3)
@@ -1631,10 +1668,17 @@ class PndScraperClient:
                 driver.execute_script("arguments[0].click();", toggle_button)
             time.sleep(1)
 
-            csv_xpath = "//a[normalize-space()='CSV'] | //a[contains(., 'CSV')] | //button[contains(., 'CSV')]"
-            csv_link = wait.until(
-                EC.presence_of_element_located((By.XPATH, csv_xpath))
-            )
+            csv_xpath = ".//a[normalize-space()='CSV'] | .//a[contains(., 'CSV')] | .//button[contains(., 'CSV')]"
+            csv_link = None
+            if container is not None:
+                try:
+                    csv_link = container.find_element(By.XPATH, csv_xpath)
+                except Exception:
+                    pass
+            if csv_link is None:
+                csv_link = wait.until(
+                    EC.presence_of_element_located((By.XPATH, "//" + csv_xpath[2:]))
+                )
             try:
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", csv_link)
                 time.sleep(0.3)
