@@ -1,0 +1,18 @@
+fetch_data:
+  name: Stáhnout data z PND
+  description: Spustí okamžité stažení dat z Portálu Naměřených Dat ČEZ Distribuce.
+  fields:
+    ean:
+      name: EAN kód
+      description: Specifický EAN pro stažení (nepovinné při existenci jediného odběrného místa).
+      required: false
+      example: "859182400123456789"
+      selector:
+        text:
+    date_range:
+      name: Období
+      description: Volitelný rozsah datumů pro zpětné stažení (formát DD.MM.YYYY - DD.MM.YYYY).
+      required: false
+      example: "01.08.2026 - 15.08.2026"
+      selector:
+        text:

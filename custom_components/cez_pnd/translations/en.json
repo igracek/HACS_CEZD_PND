@@ -1,0 +1,99 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to CEZ Distribuce PND",
+        "description": "Enter your credentials for the CEZ Distribuce Measured Data Portal (PND) and your meter identifiers.",
+        "data": {
+          "username": "Login Email / Username",
+          "password": "Password",
+          "ean": "EAN Code (18 digits)",
+          "elm": "Electricity Meter Number (ELM)",
+          "tariff_entity": "Optional VT/NT Tariff boolean entity (e.g. binary_sensor.hdo)",
+          "scan_time": "Daily scan time (HH:MM)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate with CEZ PND",
+        "description": "Enter new password for EAN {ean}.",
+        "data": {
+          "password": "Password"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure CEZ Distribuce PND",
+        "description": "Update credentials and meter settings for EAN {ean}.",
+        "data": {
+          "username": "Login Email / Username",
+          "password": "Password",
+          "elm": "Electricity Meter Number (ELM)",
+          "scan_time": "Daily scan time (HH:MM)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to CEZ PND portal.",
+      "cannot_change_ean": "EAN cannot be modified during reconfiguration. To use a different EAN, add a new integration.",
+      "invalid_auth": "Invalid username or password.",
+      "invalid_ean": "Invalid EAN code format (must contain exactly 18 digits).",
+      "invalid_elm": "Invalid ELM number format (alphanumeric, dash, and underscore allowed, max 30 characters).",
+      "invalid_scan_time": "Invalid scan time format (expected HH:MM).",
+      "invalid_debug_path": "The specified debug path is invalid or outside the allowed Home Assistant root directory.",
+      "invalid_debug_dir": "The specified debug directory is invalid or outside the allowed Home Assistant root directory.",
+      "captcha_detected": "CEZ PND portal requires CAPTCHA verification.",
+      "account_locked": "CEZ PND account is locked.",
+      "timeout": "Connection to CEZ PND portal timed out.",
+      "elm_not_found": "Specified ELM number was not found in account.",
+      "service_unavailable": "CEZ PND portal is under maintenance.",
+      "unknown": "Unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This EAN is already configured in Home Assistant.",
+      "reauth_successful": "Reauthentication successful.",
+      "reconfigure_successful": "Configuration successfully updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "CEZ Distribuce PND Options",
+        "description": "Update synchronization parameters and tariff settings.",
+        "data": {
+          "password": "New Password (leave empty to keep current)",
+          "tariff_entity": "VT/NT Tariff Entity (ON = High, OFF = Low)",
+          "scan_time": "Daily scan time (HH:MM)",
+          "debug_mode": "Enable Debug Mode",
+          "debug_dir": "Directory for debug dumps and screenshots"
+        }
+      }
+    },
+    "error": {
+      "invalid_debug_path": "The specified debug path is invalid or outside the allowed Home Assistant root directory.",
+      "invalid_debug_dir": "The specified debug directory is invalid or outside the allowed Home Assistant root directory.",
+      "invalid_scan_time": "Invalid scan time format (expected HH:MM).",
+      "invalid_auth": "Invalid username or password.",
+      "captcha_detected": "CEZ PND portal requires CAPTCHA verification.",
+      "account_locked": "CEZ PND account is locked.",
+      "timeout": "Connection to CEZ PND portal timed out.",
+      "elm_not_found": "Specified ELM number was not found in account.",
+      "service_unavailable": "CEZ PND portal is under maintenance.",
+      "cannot_connect": "Failed to connect to CEZ PND portal."
+    }
+  },
+  "services": {
+    "fetch_data": {
+      "name": "Fetch PND Data",
+      "description": "Trigger download from CEZ Distribuce Measured Data Portal.",
+      "fields": {
+        "ean": {
+          "name": "EAN code",
+          "description": "Identifier of the measurement point."
+        },
+        "date_range": {
+          "name": "Date Range",
+          "description": "Optional date range in DD.MM.YYYY - DD.MM.YYYY format."
+        }
+      }
+    }
+  }
+}

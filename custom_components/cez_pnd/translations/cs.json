@@ -1,0 +1,99 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Připojení k ČEZ Distribuce PND",
+        "description": "Zadejte přihlašovací údaje k Portálu Naměřených Dat (PND) ČEZ Distribuce a identifikátory odběrného místa.",
+        "data": {
+          "username": "Přihlašovací e-mail / Uživatelské jméno",
+          "password": "Heslo",
+          "ean": "EAN kód odběrného místa (18 číslic)",
+          "elm": "Číslo elektroměru (ELM)",
+          "tariff_entity": "Volitelná entita stavu HDO / VT-NT (např. binary_sensor.hdo)",
+          "scan_time": "Čas denního stahování (HH:MM)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Obnovení přihlášení ČEZ PND",
+        "description": "Zadejte nové heslo pro účet odběrného místa {ean}.",
+        "data": {
+          "password": "Heslo"
+        }
+      },
+      "reconfigure": {
+        "title": "Přenastavení ČEZ Distribuce PND",
+        "description": "Upravte konfiguraci odběrného místa {ean} a přihlašovacích údajů.",
+        "data": {
+          "username": "Přihlašovací e-mail / Uživatelské jméno",
+          "password": "Heslo",
+          "elm": "Číslo elektroměru (ELM)",
+          "scan_time": "Čas denního stahování (HH:MM)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nepodařilo se navázat spojení s portálem ČEZ PND.",
+      "cannot_change_ean": "Kód EAN nelze při přenastavení změnit. Pro změnu EAN přidejte novou integraci.",
+      "invalid_auth": "Neplatné uživatelské jméno nebo heslo.",
+      "invalid_ean": "Neplatný formát EAN kódu (musí obsahovat přesně 18 číslic).",
+      "invalid_elm": "Neplatný formát čísla ELM (povoleny alfanumerické znaky, pomlčka a podtržítko, max 30 znaků).",
+      "invalid_scan_time": "Neplatný formát času skenování (očekává se HH:MM).",
+      "invalid_debug_path": "Zadaná ladicí cesta je neplatná nebo leží mimo povolený kořen Home Assistant.",
+      "invalid_debug_dir": "Zadaná ladicí složka je neplatná nebo leží mimo povolený kořen Home Assistant.",
+      "captcha_detected": "Portál ČEZ PND vyžaduje ověření CAPTCHA.",
+      "account_locked": "Účet ČEZ PND je zablokován.",
+      "timeout": "Vypršel časový limit pro komunikaci s portálem ČEZ PND.",
+      "elm_not_found": "Zadané číslo ELM nebylo nalezeno v nabídce portálu.",
+      "service_unavailable": "Portál ČEZ PND prochází údržbou / odstávkou.",
+      "unknown": "Došlo k neočekávané chybě."
+    },
+    "abort": {
+      "already_configured": "Toto odběrné místo (EAN) je již v Home Assistant nakonfigurováno.",
+      "reauth_successful": "Opětovné přihlášení proběhlo úspěšně.",
+      "reconfigure_successful": "Konfigurace byla úspěšně aktualizována."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Nastavení ČEZ Distribuce PND",
+        "description": "Upravte parametry stahování a tarifního vyhodnocení.",
+        "data": {
+          "password": "Nové heslo (ponechte prázdné pro zachování)",
+          "tariff_entity": "Entita stavu HDO / VT-NT (ON = VT, OFF = NT)",
+          "scan_time": "Čas denního stahování (HH:MM)",
+          "debug_mode": "Aktivovat ladicí režim (Debug Mode)",
+          "debug_dir": "Složka pro ladicí soubory a snímky"
+        }
+      }
+    },
+    "error": {
+      "invalid_debug_path": "Zadaná ladicí cesta je neplatná nebo leží mimo povolený kořen Home Assistant.",
+      "invalid_debug_dir": "Zadaná ladicí složka je neplatná nebo leží mimo povolený kořen Home Assistant.",
+      "invalid_scan_time": "Neplatný formát času skenování (očekává se HH:MM).",
+      "invalid_auth": "Neplatné uživatelské jméno nebo heslo.",
+      "captcha_detected": "Portál ČEZ PND vyžaduje ověření CAPTCHA.",
+      "account_locked": "Účet ČEZ PND je zablokován.",
+      "timeout": "Vypršel časový limit pro komunikaci s portálem ČEZ PND.",
+      "elm_not_found": "Zadané číslo ELM nebylo nalezeno v nabídce portálu.",
+      "service_unavailable": "Portál ČEZ PND prochází údržbou / odstávkou.",
+      "cannot_connect": "Nepodařilo se navázat spojení s portálem ČEZ PND."
+    }
+  },
+  "services": {
+    "fetch_data": {
+      "name": "Stáhnout data z PND",
+      "description": "Spustí okamžité stažení dat z Portálu Naměřených Dat ČEZ Distribuce.",
+      "fields": {
+        "ean": {
+          "name": "EAN kód",
+          "description": "Identifikátor odběrného místa."
+        },
+        "date_range": {
+          "name": "Období",
+          "description": "Volitelný rozsah datumů ve formátu DD.MM.YYYY - DD.MM.YYYY."
+        }
+      }
+    }
+  }
+}

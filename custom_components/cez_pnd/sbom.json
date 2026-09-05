@@ -1,0 +1,120 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.5.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:6d42e01a-9f5b-48c5-9273-0487c6f370b4",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-05T16:45:00Z",
+    "component": {
+      "type": "application",
+      "name": "HACS_CEZD_PND",
+      "version": "1.0.0",
+      "description": "Home Assistant custom integration for CEZ Distribuce PND portal",
+      "purl": "pkg:github/gitea_admin/HACS_CEZD_PND@1.0.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    },
+    "tools": [
+      {
+        "vendor": "Antigravity",
+        "name": "SecAudit-Attestation-Engine",
+        "version": "2.0.0"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "selenium",
+      "version": "4.25.0",
+      "purl": "pkg:pypi/selenium@4.25.0",
+      "scope": "required",
+      "advisory_min_version": "4.15.0",
+      "max_version_exclusive": "5.0.0",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "8b5f39d2c2084c781613bc0fae6bb1c2c366ff175d26a27e7fdfab822e032d96"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "beautifulsoup4",
+      "version": "4.12.3",
+      "purl": "pkg:pypi/beautifulsoup4@4.12.3",
+      "scope": "required",
+      "advisory_min_version": "4.12.0",
+      "max_version_exclusive": "5.0.0",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a75878fe98c464bfd425c276b58602b9b9c9f2eb5d8c3fb9f9b5bc75185d8866"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "urllib3",
+      "version": "2.2.3",
+      "purl": "pkg:pypi/urllib3@2.2.3",
+      "scope": "transitive",
+      "advisory_min_version": "2.0.7",
+      "licenses": [{"license": {"id": "MIT"}}]
+    },
+    {
+      "type": "library",
+      "name": "certifi",
+      "version": "2024.8.30",
+      "purl": "pkg:pypi/certifi@2024.8.30",
+      "scope": "transitive",
+      "advisory_min_version": "2023.7.22",
+      "licenses": [{"license": {"id": "MPL-2.0"}}]
+    }
+  ],
+  "browser_runtime_matrix": {
+    "supported_browsers": [
+      {
+        "name": "Chromium",
+        "min_version": 114,
+        "max_tested_version": 134,
+        "recommended_channel": "stable",
+        "disallowed_flags": [
+          "--no-sandbox",
+          "--disable-seccomp-filter-sandbox",
+          "--disable-setuid-sandbox"
+        ]
+      },
+      {
+        "name": "Google Chrome",
+        "min_version": 114,
+        "max_tested_version": 134,
+        "recommended_channel": "stable",
+        "disallowed_flags": [
+          "--no-sandbox",
+          "--disable-seccomp-filter-sandbox",
+          "--disable-setuid-sandbox"
+        ]
+      }
+    ],
+    "supported_drivers": [
+      {
+        "name": "chromedriver",
+        "match_browser_major_version": true,
+        "min_version": 114
+      },
+      {
+        "name": "geckodriver",
+        "min_version": "0.33.0"
+      }
+    ]
+  }
+}
