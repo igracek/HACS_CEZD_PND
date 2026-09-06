@@ -76,6 +76,16 @@ class PndClientProtocol(Protocol):
 
     app_version: Optional[str]
 
+    def test_login(
+        self,
+        temp_dir: Optional[str] = None,
+        stop_event: Optional[threading.Event] = None,
+        deadline: Optional[float] = None,
+        hass_config_dir: Optional[str] = None,
+    ) -> Tuple[bool, str, List[str]]:
+        """Test login credentials and configured ELM."""
+        ...
+
     def download_yesterday_data(
         self,
         download_dir: str,
@@ -284,10 +294,11 @@ class PndHttpClient:
         metadata: Optional[Dict[str, Any]] = None,
         stop_event: Optional[threading.Event] = None,
         deadline: Optional[float] = None,
-    ) -> None:
-        """Verify/select ELM meter identifier in PND account."""
+    ) -> List[str]:
+        """Verify/select ELM meter identifier in PND account and return available ELMs."""
+        available_elms: List[str] = []
         if not self.elm and not self.ean:
-            return
+            return available_elms
 
         # 1. Check metadata meters if provided
         if metadata:
@@ -295,8 +306,10 @@ class PndHttpClient:
             if isinstance(meters, list) and len(meters) > 0:
                 elm_list = [str(m.get("elm") or m.get("electrometerId") or m.get("id", "")).strip() for m in meters if isinstance(m, dict)]
                 ean_list = [str(m.get("ean", "")).strip() for m in meters if isinstance(m, dict)]
+                available_elms = [e for e in elm_list if e]
                 if self.elm and self.elm not in elm_list and self.ean not in ean_list:
                     raise PndElmNotFoundError(f"ELM meter {mask_elm(self.elm)} not found in account (ERR_ELM_NOT_FOUND)")
+                return available_elms
 
         # 2. Check meters API endpoint fallback
         meters_url = "https://pnd.cezdistribuce.cz/cezpnd2/api/v1/consumption/meters"
@@ -308,14 +321,18 @@ class PndHttpClient:
                     if isinstance(data, list) and len(data) > 0:
                         elm_list = [str(item.get("elm", "")).strip() for item in data if isinstance(item, dict)]
                         ean_list = [str(item.get("ean", "")).strip() for item in data if isinstance(item, dict)]
+                        available_elms = [e for e in elm_list if e]
                         if self.elm and self.elm not in elm_list and self.ean not in ean_list:
                             raise PndElmNotFoundError(f"ELM meter {mask_elm(self.elm)} not found in account (ERR_ELM_NOT_FOUND)")
+                        return available_elms
                 except ValueError:
                     pass
         except PndElmNotFoundError:
             raise
         except Exception as err:
             _LOGGER.debug("ELM verification endpoint check note: %s", err)
+
+        return available_elms
 
     def _format_date_param(self, date_str: str) -> str:
         """Format date string to DD.MM.YYYY 00:00 as required by export API endpoint."""
@@ -383,6 +400,24 @@ class PndHttpClient:
             with open(target_path, "w", encoding="utf-8") as f:
                 f.write("")
         return target_path
+
+    def test_login(
+        self,
+        temp_dir: Optional[str] = None,
+        stop_event: Optional[threading.Event] = None,
+        deadline: Optional[float] = None,
+        hass_config_dir: Optional[str] = None,
+    ) -> Tuple[bool, str, List[str]]:
+        """Test HTTP login credentials and configured ELM."""
+        session = requests.Session()
+        session.headers.update({"User-Agent": DEFAULT_USER_AGENT})
+        try:
+            self._login(session, stop_event, deadline)
+            metadata = self._fetch_dashboard_metadata(session, stop_event, deadline)
+            available_elms = self._select_elm(session, metadata, stop_event, deadline) or []
+            return True, self.app_version or "PND 2.0", available_elms
+        finally:
+            session.close()
 
     def download_yesterday_data(
         self,
