@@ -28,6 +28,7 @@
           "username": "Login Email / Username",
           "password": "Password",
           "elm": "Electricity Meter Number (ELM)",
+          "client_mode": "Client Mode (Direct HTTP / Browser)",
           "scan_time": "Daily scan time (HH:MM)"
         }
       }

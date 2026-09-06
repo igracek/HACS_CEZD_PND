@@ -9,6 +9,7 @@
           "password": "Heslo",
           "ean": "EAN kód odběrného místa (18 číslic)",
           "elm": "Číslo elektroměru (ELM)",
+          "client_mode": "Režim klienta (přímý HTTP / prohlížeč)",
           "tariff_entity": "Volitelná entita stavu HDO / VT-NT (např. binary_sensor.hdo)",
           "scan_time": "Čas denního stahování (HH:MM)"
         }
@@ -60,6 +61,7 @@
         "description": "Upravte parametry stahování a tarifního vyhodnocení.",
         "data": {
           "password": "Nové heslo (ponechte prázdné pro zachování)",
+          "client_mode": "Režim klienta (přímý HTTP / prohlížeč)",
           "tariff_entity": "Entita stavu HDO / VT-NT (ON = VT, OFF = NT)",
           "scan_time": "Čas denního stahování (HH:MM)",
           "debug_mode": "Aktivovat ladicí režim (Debug Mode)",
@@ -93,6 +95,14 @@
           "name": "Období",
           "description": "Volitelný rozsah datumů ve formátu DD.MM.YYYY - DD.MM.YYYY."
         }
+      }
+    }
+  },
+  "selector": {
+    "client_mode": {
+      "options": {
+        "http": "Přímé HTTP dotazy (bez prohlížeče - doporučeno)",
+        "browser": "Webový prohlížeč (Headless Browser)"
       }
     }
   }

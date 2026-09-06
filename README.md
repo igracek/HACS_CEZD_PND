@@ -10,15 +10,18 @@ Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8
 
 ## ⚡ Hlavní funkce
 
+- **Dva provozní režimy stahování dat:**
+  - **Režim přímého HTTP (Doporučeno / Browserless):** Čisté, rychlé a lehké stahování dat přímo přes HTTP dotazy a ČEZ SSO bez nutnosti instalovat Chromium nebo Selenium webdriver. Nulové nároky na RAM.
+  - **Režim prohlížeče (Headless Browser):** Automatizace přes headless Chromium nebo Firefox s ochranou paměti (limit V8 heap 256 MB, seccomp sandbox) a procesním semaforem.
 - **Plná podpora Home Assistant Energy Dashboardu (HA 2026.8+):** 15minutové historické profily spotřeby (+A) a dodávky/výroby (-A) jsou importovány přes moderní API `async_add_external_statistics` do externích dlouhodobých statistik (`cez_pnd:<ean>_*`) s hodinovou UTC agregací a monotónně rostoucími kumulativními součty (`sum`).
 - **Podpora sestav 01 (+A), 02 (-A), 08 (-A) a 17 (+E, -E):** Automatické stahování a parsování 15minutových profilů `01 Profil spotřeby (+A)` a `02 Profil výroby (-A)` (s fallbackem na `07` a `08`), denních souhrnů a podpora sestavy `17 Registry za den (+E, -E)` pro kontrolu a kalibraci tarifních registrů VT/NT.
 - **Robustní podpora pro čistě odběrná místa i FVE:** Plná tolerance pro odběrná místa bez fotovoltaiky (výroba se automaticky nastaví na 0.0 kWh bez chybových stavů synchronizace).
 - **Přepočet výkonu na energii a filtrace budoucích dat:** Automatická detekce a přepočet středního výkonu v `[kW]` na energii v `kWh` (faktor $0.25\,\text{h}$ pro 15min intervaly), validace profilů (+A vs -A) a filtrace nenaměřených budoucích dnů (`"neznámá hodnota"`).
 - **Automatické rozlišení VT a NT (Vysoký / Nízký tarif):** Možnost napojení na libovolnou boolean entitu v HA (např. spínání HDO) – integrace zpětně rozdělí spotřebu podle stavu entity v daných intervalech (s bezpečným fallbackem na VT).
-- **Konfigurace přes UI (Config Flow, Options Flow & Reauth):** Žádné ruční úpravy YAML souborů. Možnost správy více odběrných míst (EAN/ELM) v rámci jedné instalace, bezpečné rotace hesel bez prefillu a ochrana neměnnosti EAN.
+- **Konfigurace přes UI (Config Flow, Options Flow & Reauth):** Žádné ruční úpravy YAML souborů. Možnost volby provozního režimu (HTTP / Prohlížeč), správy více odběrných míst (EAN/ELM), bezpečné rotace hesel bez prefillu a ochrana neměnnosti EAN.
 - **Plná podpora ČEZ Single Sign-On:** Podpora SSO domén ČEZ (`pnd.cezdistribuce.cz`, `mepas.cez.cz`, `dip.cezdistribuce.cz`) s přísnou kontrolou originu.
 - **Robustní diagnostický a debugovací subsystém:** Integrovaná nativní platforma diagnostiky Home Assistantu (`diagnostics.py`), opt-in ukládání sanitizovaných DOM HTML dumpů při chybách se striktní anonymizací (redaction) citlivých údajů a auto-pruningem.
-- **Bezpečnostní architektura a správa procesů:** Běh headless prohlížeče v HA Executor thread poolu pod dohledem procesního semaforu, garance uvolnění zdrojů, okamžitá validace TLS originu na všech citlivých hranicích a explicitní rollback platforem při selhání setupu.
+- **Bezpečnostní architektura a správa procesů:** Izolace běhu pod procesním semaforem, garance uvolnění zdrojů, okamžitá validace TLS originu na všech citlivých hranicích a explicitní rollback platforem při selhání setupu.
 - **Striktní integrita a validace dat:** Diskrétní stavové senzory nemají `state_class: total` (zamezení zdvojení statistik v Recorderu), striktní odmítání neplatných hodnot a deterministický výpočet baseline sumy.
 
 ---
@@ -27,17 +30,21 @@ Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8
 
 ### 1. Požadavky na systém a závislosti
 
-> [!IMPORTANT]
-> **Integrace sama webový prohlížeč neinstaluje.** Pro fungování automatizovaného stahování dat z portálu ČEZ PND je nutné mít v prostředí Home Assistantu nebo na hostitelském operačním systému externě nainstalován podporovaný webový prohlížeč a odpovídající webdriver.
+> [!TIP]
+> **Doporučený režim: Přímé HTTP (Browserless)**  
+> Pokud používáte výchozí režim HTTP klienta, **není potřeba instalovat žádný webový prohlížeč ani webdriver**. Integrace funguje přímo out-of-the-box s minimální spotřebou systémových prostředků.
+> 
+> Pokud si zvolíte režim prohlížeče (Browser mode), je nutné mít v prostředí Home Assistantu nainstalované Chromium nebo Firefox.
 
-Pro spolehlivý běh integrace jsou vyžadovány následující verze komponent a runtime závislostí:
+Pro spolehlivý běh integrace jsou vyžadovány:
 
 - **Home Assistant Core:** `2026.8.0+`
 - **Python:** `3.12+` / `3.14+`
 - **Python knihovny (spravováno v manifest.json):**
-  - `selenium>=4.15.0,<5.0.0`
+  - `requests>=2.31.0`
   - `beautifulsoup4>=4.12.0,<5.0.0`
-- **Podporované webové prohlížeče a ovladače:**
+  - `selenium>=4.15.0,<5.0.0` (pouze pro režim prohlížeče)
+- **Volitelně pro režim prohlížeče (Chromium / Firefox):**
   - **Chromium / Google Chrome** a odpovídající **ChromeDriver** *(doporučeno)*
   - **Mozilla Firefox** a **Geckodriver**
 - **Home Assistant OS / Supervised / Container (Alpine Linux):**

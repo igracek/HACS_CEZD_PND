@@ -22,16 +22,21 @@ from .const import (
     APP_PATH_PREFIX,
     AUTH_ALLOWED_HOSTNAMES,
     AUTH_HOST_PATH_CONTRACTS,
+    BROWSER_V8_MAX_OLD_SPACE_MB,
     CONF_DEBUG_DIR,
     CONF_DEBUG_MODE,
+    CONF_ENABLE_NETWORK_CAPTURE,
     CREDENTIAL_ENTRY_ALLOWED_PATH_PREFIXES,
     DEFAULT_BROWSER_HEADLESS,
     DEFAULT_DEBUG_DIR,
     DEFAULT_DEBUG_MODE,
+    DEFAULT_ENABLE_NETWORK_CAPTURE,
     DISALLOWED_BROWSER_FLAGS,
     ERR_INSECURE_BROWSER,
+    ERR_RESOURCE,
     IDP_ALLOWED_HOSTNAMES,
     IDP_ALLOWED_ORIGINS,
+    MIN_FREE_RAM_MB_FOR_BROWSER,
     ORIGIN_STATE_APP,
     ORIGIN_STATE_AUTH,
     ORIGIN_STATE_CREDENTIALS,
@@ -81,6 +86,10 @@ class PndScraperError(PndError):
 
 class PndInsecureBrowserError(PndScraperError):
     """Error raised when browser runtime violates least-privilege / sandbox requirements (SEC10-03)."""
+
+
+class PndResourceError(PndScraperError):
+    """Error raised when system resources (RAM, etc.) are insufficient for browser execution."""
 
 
 class PndParseError(PndError, ValueError):
@@ -135,10 +144,44 @@ def validate_safe_path(
     return resolved_target
 
 
+def get_available_memory_mb() -> Optional[float]:
+    """Return available system memory in MB, or None if undetermined."""
+    if os.path.exists("/proc/meminfo"):
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            return int(parts[1]) / 1024.0
+        except Exception:
+            pass
+    try:
+        import psutil  # type: ignore
+
+        return float(psutil.virtual_memory().available / (1024.0 * 1024.0))
+    except Exception:
+        pass
+    return None
+
+
+def verify_system_resources(min_free_ram_mb: int = MIN_FREE_RAM_MB_FOR_BROWSER) -> None:
+    """Ensure sufficient system RAM is available before spawning browser process."""
+    avail = get_available_memory_mb()
+    if avail is not None and avail < min_free_ram_mb:
+        raise PndResourceError(
+            f"Nedostatek volné operační paměti pro spuštění prohlížeče: k dispozici {avail:.1f} MB, vyžadováno {min_free_ram_mb} MB ({ERR_RESOURCE})"
+        )
+
+
 class PndScraperClient:
     """Headless browser client for CEZ Distribuce PND portal."""
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        enable_network_capture: Optional[bool] = None,
+    ) -> None:
         """Initialize scraper client with configuration."""
         self.username = config.get("username", "")
         self.password = config.get("password", "")
@@ -148,6 +191,12 @@ class PndScraperClient:
         self.app_version: str = "unknown"
         self.debug_mode = config.get(CONF_DEBUG_MODE, DEFAULT_DEBUG_MODE)
         self.debug_dir = config.get(CONF_DEBUG_DIR, DEFAULT_DEBUG_DIR)
+        if enable_network_capture is not None:
+            self.enable_network_capture = bool(enable_network_capture)
+        else:
+            self.enable_network_capture = bool(
+                config.get("enable_network_capture", config.get(CONF_ENABLE_NETWORK_CAPTURE, DEFAULT_ENABLE_NETWORK_CAPTURE))
+            ) or bool(self.debug_mode)
         self.last_debug_artifacts: List[str] = []
         self.effective_sandbox_verified: bool = False
         self.effective_sandbox_mode: str = "enforced_least_privilege"
@@ -228,6 +277,244 @@ class PndScraperClient:
 
         return sanitized
 
+    def _sanitize_cookie_header(self, cookie_val: str) -> str:
+        """Sanitize Cookie or Set-Cookie header string by redacting values."""
+        if not cookie_val:
+            return ""
+        parts = cookie_val.split(";")
+        sanitized_parts = []
+        for part in parts:
+            if "=" in part:
+                k, _ = part.split("=", 1)
+                sanitized_parts.append(f"{k.strip()}=[REDACTED]")
+            else:
+                sanitized_parts.append("[REDACTED]")
+        return "; ".join(sanitized_parts)
+
+    def _sanitize_network_string(self, s: str) -> str:
+        """Redact passwords, credentials, RČ, EAN, ELM, tokens and session cookies from network capture string."""
+        if not s:
+            return ""
+        res = str(s)
+        if self.password:
+            res = res.replace(self.password, "[REDACTED]")
+        if self.username:
+            res = res.replace(self.username, "[REDACTED]")
+        if self.ean:
+            res = res.replace(self.ean, "[REDACTED_EAN]")
+        if self.elm:
+            res = res.replace(self.elm, "[REDACTED_ELM]")
+
+        # Czech Rodné číslo (YYMMDD/XXXX or YYMMDDXXXX)
+        res = re.sub(r'\b\d{6}/?\d{3,4}\b', '[REDACTED_RC]', res)
+
+        # 18-digit EANs
+        res = re.sub(r'\b\d{18}\b', '[REDACTED_EAN]', res)
+
+        # Password parameters in body / query string / JSON / form data
+        res = re.sub(
+            r'(?i)(["\']?(?:password|passwd|pwd|pass|heslo)["\']?\s*[:=]\s*)(["\']?)[^&"\'\s,{}]+(\2)',
+            r'\1\2[REDACTED]\2',
+            res,
+        )
+        res = re.sub(
+            r'(?i)([?&](?:password|passwd|pwd|pass|heslo)=)[^&\s"\'<>]*',
+            r'\1[REDACTED]',
+            res,
+        )
+
+        # Username / Login parameters
+        res = re.sub(
+            r'(?i)(["\']?(?:username|user|login|email)["\']?\s*[:=]\s*)(["\']?)[^&"\'\s,{}]+(\2)',
+            r'\1\2[REDACTED]\2',
+            res,
+        )
+        res = re.sub(
+            r'(?i)([?&](?:username|user|login|email)=)[^&\s"\'<>]*',
+            r'\1[REDACTED]',
+            res,
+        )
+
+        # Sensitive Tokens & Credentials (access_token, id_token, refresh_token, code, ticket, SAMLResponse, assertion)
+        res = re.sub(
+            r'(?i)(["\']?(?:access_token|refresh_token|id_token|code|ticket|samlresponse|assertion|auth_token|session_id|jsessionid|asp\.net_sessionid)["\']?\s*[:=]\s*)(["\']?)[^&"\'\s,{}]+(\2)',
+            r'\1\2[REDACTED]\2',
+            res,
+        )
+        res = re.sub(
+            r'(?i)([?&](?:access_token|refresh_token|id_token|code|ticket|samlresponse|assertion|token|session_id)=)[^&\s"\'<>]*',
+            r'\1[REDACTED]',
+            res,
+        )
+
+        # Bearer tokens & JWTs
+        res = re.sub(r'(?i)\bbearer\s+[A-Za-z0-9_\-\.]+', 'Bearer [REDACTED]', res)
+        res = re.sub(r'\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b', '[REDACTED_JWT]', res)
+
+        # Fallback masking
+        res = self._mask_sensitive(res)
+        return res
+
+    def _sanitize_network_data(self, data: Any) -> Any:
+        """Recursively sanitize sensitive data structures for network capture."""
+        if isinstance(data, str):
+            return self._sanitize_network_string(data)
+        elif isinstance(data, dict):
+            sanitized_dict: Dict[str, Any] = {}
+            for k, v in data.items():
+                k_lower = str(k).lower()
+                if k_lower in ("authorization", "proxy-authorization", "x-auth-token"):
+                    sanitized_dict[k] = "[REDACTED]"
+                elif k_lower in ("cookie", "set-cookie"):
+                    sanitized_dict[k] = self._sanitize_cookie_header(str(v))
+                elif k_lower in ("password", "passwd", "pwd", "pass", "heslo", "secret", "client_secret"):
+                    sanitized_dict[k] = "[REDACTED]"
+                else:
+                    sanitized_dict[k] = self._sanitize_network_data(v)
+            return sanitized_dict
+        elif isinstance(data, list):
+            return [self._sanitize_network_data(item) for item in data]
+        return data
+
+    def _capture_network_traffic(
+        self,
+        driver: Any,
+        phase: str = "capture",
+        target_dir: Optional[str] = None,
+        hass_config_dir: Optional[str] = None,
+    ) -> Optional[str]:
+        """Capture CDP performance log network events, sanitize sensitive data, and write network capture JSON file."""
+        if not self.enable_network_capture or not driver or not hasattr(driver, "get_log"):
+            return None
+
+        try:
+            raw_logs = driver.get_log("performance")
+        except Exception as log_err:
+            _LOGGER.debug("Could not get performance log: %s", type(log_err).__name__)
+            return None
+
+        if not raw_logs:
+            return None
+
+        cdp_events: List[Dict[str, Any]] = []
+        requests_map: Dict[str, Dict[str, Any]] = {}
+
+        for entry in raw_logs:
+            try:
+                message_str = entry.get("message", "")
+                if not message_str:
+                    continue
+                entry_obj = json.loads(message_str)
+                cdp_msg = entry_obj.get("message", entry_obj)
+                method = cdp_msg.get("method", "")
+                params = cdp_msg.get("params", {})
+
+                if method not in (
+                    "Network.requestWillBeSent",
+                    "Network.responseReceived",
+                    "Network.loadingFinished",
+                    "Network.loadingFailed",
+                ):
+                    continue
+
+                cdp_events.append({
+                    "method": method,
+                    "params": params,
+                    "timestamp": entry.get("timestamp"),
+                })
+
+                req_id = params.get("requestId")
+                if not req_id:
+                    continue
+
+                if req_id not in requests_map:
+                    requests_map[req_id] = {
+                        "request_id": req_id,
+                        "url": "",
+                        "method": "",
+                        "request_headers": {},
+                        "post_data": None,
+                        "redirect_chain": [],
+                        "response": None,
+                        "status": "pending",
+                    }
+
+                req_item = requests_map[req_id]
+
+                if method == "Network.requestWillBeSent":
+                    req = params.get("request", {})
+                    req_item["url"] = req.get("url", "")
+                    req_item["method"] = req.get("method", "")
+                    req_item["request_headers"] = req.get("headers", {})
+                    if "postData" in req:
+                        req_item["post_data"] = req.get("postData")
+                    elif "postDataEntries" in req:
+                        req_item["post_data"] = req.get("postDataEntries")
+
+                    redirect_resp = params.get("redirectResponse")
+                    if redirect_resp:
+                        req_item["redirect_chain"].append({
+                            "url": redirect_resp.get("url", ""),
+                            "status": redirect_resp.get("status"),
+                            "status_text": redirect_resp.get("statusText"),
+                            "headers": redirect_resp.get("headers", {}),
+                        })
+
+                elif method == "Network.responseReceived":
+                    resp = params.get("response", {})
+                    req_item["response"] = {
+                        "url": resp.get("url", ""),
+                        "status": resp.get("status"),
+                        "status_text": resp.get("statusText"),
+                        "mime_type": resp.get("mimeType", ""),
+                        "headers": resp.get("headers", {}),
+                    }
+
+                elif method == "Network.loadingFinished":
+                    req_item["status"] = "finished"
+                    req_item["encoded_data_length"] = params.get("encodedDataLength")
+
+                elif method == "Network.loadingFailed":
+                    req_item["status"] = "failed"
+                    req_item["error_text"] = params.get("errorText")
+                    req_item["canceled"] = params.get("canceled", False)
+
+            except Exception:
+                continue
+
+        requests_list = list(requests_map.values())
+        raw_payload = {
+            "timestamp": datetime.now().isoformat(),
+            "phase": phase,
+            "summary": {
+                "total_raw_logs": len(raw_logs),
+                "total_cdp_events": len(cdp_events),
+                "total_requests": len(requests_list),
+            },
+            "requests": requests_list,
+            "cdp_events": cdp_events,
+        }
+
+        # Apply strict security sanitization
+        sanitized_data = self._sanitize_network_data(raw_payload)
+
+        active_dir = self._validate_debug_dir(target_dir or self.debug_dir, hass_config_dir=hass_config_dir)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = os.path.join(active_dir, f"network_capture_{ts}.json")
+
+        # Atomic write with 0600 permissions
+        encoded_bytes = json.dumps(sanitized_data, indent=2).encode("utf-8")
+        self._atomic_write_file(file_path, encoded_bytes)
+        try:
+            os.chmod(file_path, 0o600)
+        except OSError:
+            pass
+
+        self.last_debug_artifacts.append(file_path)
+        self._prune_debug_artifacts(target_dir=active_dir)
+        _LOGGER.info("Saved network capture (%d requests) to %s", len(requests_list), os.path.basename(file_path))
+        return file_path
+
     def _check_deadline_and_stop(
         self,
         driver: Any = None,
@@ -302,13 +589,13 @@ class PndScraperClient:
             return
         try:
             now = time.time()
-            # Allowlist ONLY files strictly starting with 'cez_pnd_debug_'
+            # Allowlist ONLY files strictly starting with 'cez_pnd_debug_' or 'network_capture_'
             all_files = [
                 os.path.join(active_dir, f)
                 for f in os.listdir(active_dir)
                 if os.path.isfile(os.path.join(active_dir, f))
                 and not os.path.islink(os.path.join(active_dir, f))
-                and f.startswith("cez_pnd_debug_")
+                and (f.startswith("cez_pnd_debug_") or f.startswith("network_capture_"))
             ]
 
             # 1. Delete files older than max_age_days
@@ -323,11 +610,11 @@ class PndScraperClient:
                 except Exception as del_err:
                     _LOGGER.debug("Could not check/remove old debug file %s: %s", os.path.basename(fp), type(del_err).__name__)
 
-            # 2. Group files by timestamp prefix (cez_pnd_debug_YYYYMMDD_HHMMSS)
+            # 2. Group files by timestamp prefix (cez_pnd_debug_YYYYMMDD_HHMMSS or network_capture_YYYYMMDD_HHMMSS)
             set_dict: Dict[str, List[str]] = {}
             for fp in remaining_files:
                 fname = os.path.basename(fp)
-                match = re.search(r"(cez_pnd_debug_\d{8}_\d{6})", fname)
+                match = re.search(r"((?:cez_pnd_debug_|network_capture_)\d{8}_\d{6})", fname)
                 prefix = match.group(1) if match else fname
                 set_dict.setdefault(prefix, []).append(fp)
 
@@ -555,6 +842,9 @@ class PndScraperClient:
 
     def _init_driver(self, download_dir: str) -> Any:
         """Initialize headless Chrome or Firefox WebDriver."""
+        # Pre-flight host memory verification (OOM protection)
+        verify_system_resources()
+
         os.makedirs(download_dir, exist_ok=True)
         try:
             os.chmod(download_dir, 0o777)
@@ -570,6 +860,8 @@ class PndScraperClient:
             from selenium.webdriver.chrome.service import Service as ChromeService
 
             options = ChromeOptions()
+            if self.enable_network_capture:
+                options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
             if self.headless:
                 options.add_argument("--headless=new")
             options.add_argument("--disable-gpu")
@@ -577,6 +869,15 @@ class PndScraperClient:
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_argument("--log-level=3")
+            # Resource & memory boundaries to protect Home Assistant host (SEC10 / OOM protection)
+            options.add_argument(f"--js-flags=--max-old-space-size={BROWSER_V8_MAX_OLD_SPACE_MB}")
+            options.add_argument("--renderer-process-limit=1")
+            options.add_argument("--disable-extensions")
+            options.add_argument("--disable-background-networking")
+            options.add_argument("--disable-sync")
+            options.add_argument("--disable-default-apps")
+            options.add_argument("--disk-cache-size=10485760")
+            options.add_argument("--media-cache-size=10485760")
             options.add_experimental_option("prefs", {
                 "download.default_directory": os.path.abspath(download_dir),
                 "download.prompt_for_download": False,
@@ -604,6 +905,11 @@ class PndScraperClient:
             driver.set_script_timeout(30)
             driver.set_window_size(1920, 1080)
             if hasattr(driver, "execute_cdp_cmd"):
+                if self.enable_network_capture:
+                    try:
+                        driver.execute_cdp_cmd("Network.enable", {})
+                    except Exception as cdp_err:
+                        _LOGGER.debug("Could not execute CDP Network.enable: %s", type(cdp_err).__name__)
                 for cmd in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior"):
                     try:
                         driver.execute_cdp_cmd(
@@ -615,7 +921,7 @@ class PndScraperClient:
             _LOGGER.debug("ChromeDriver initialized successfully")
             return driver
         except Exception as chrome_err:
-            if isinstance(chrome_err, PndInsecureBrowserError):
+            if isinstance(chrome_err, (PndInsecureBrowserError, PndResourceError)):
                 raise
             _LOGGER.debug("Chrome driver initialization failed: %s; trying Firefox", type(chrome_err).__name__)
 
@@ -636,6 +942,8 @@ class PndScraperClient:
                 "application/pdf,application/zip,text/csv,application/vnd.ms-excel",
             )
             ff_options.set_preference("pdfjs.disabled", True)
+            ff_options.set_preference("browser.cache.disk.enable", False)
+            ff_options.set_preference("browser.cache.memory.capacity", 32768)
 
             # Check known firefox binary paths
             for fbp in ["/usr/bin/firefox", "/usr/bin/firefox-esr", "/usr/local/bin/firefox"]:
@@ -1240,9 +1548,29 @@ class PndScraperClient:
             self._verify_origin(driver, state=ORIGIN_STATE_APP, expected_path_prefix=APP_PATH_PREFIX)
             return True, self.app_version, available_elms
         finally:
+            if self.enable_network_capture and driver:
+                try:
+                    self._capture_network_traffic(driver, phase="test_login", hass_config_dir=hass_config_dir)
+                except Exception as c_err:
+                    _LOGGER.debug("Network capture failed in test_login: %s", type(c_err).__name__)
             self._safe_teardown(driver, proc)
             if created_temp and target_dir and os.path.exists(target_dir):
                 shutil.rmtree(target_dir, ignore_errors=True)
+
+    def _get_target_window(self, driver: Any) -> Any:
+        """Find the active .pnd-window containing ELM selection or fallback to first window."""
+        try:
+            from selenium.webdriver.common.by import By
+            windows = driver.find_elements(By.CSS_SELECTOR, ".pnd-window")
+            if not windows:
+                return driver
+            if self.elm:
+                for w in windows:
+                    if self.elm in (w.text or ""):
+                        return w
+            return windows[0]
+        except Exception:
+            return driver
 
     def _click_search_data(
         self,
@@ -1258,6 +1586,22 @@ class PndScraperClient:
 
         self._check_deadline_and_stop(driver, proc, stop_event, deadline)
         self._verify_origin(driver, state=ORIGIN_STATE_APP, expected_path_prefix=APP_PATH_PREFIX)
+
+        # 0. Try inside target window first
+        target_win = self._get_target_window(driver)
+        try:
+            elems = target_win.find_elements(
+                By.XPATH,
+                ".//button[contains(., 'Vyhledat') or contains(., 'VYHLEDAT') or contains(., 'Hledat')]"
+            )
+            for btn in elems:
+                if btn.is_displayed():
+                    driver.execute_script("arguments[0].click();", btn)
+                    _LOGGER.debug("Clicked search button inside target window")
+                    time.sleep(2)
+                    return
+        except Exception:
+            pass
 
         # 1. Candidate XPath locators
         locators = [
@@ -1333,40 +1677,38 @@ class PndScraperClient:
             self._check_deadline_and_stop(driver, proc, stop_event, deadline)
             wait = WebDriverWait(driver, 10)
 
+            win = self._get_target_window(driver)
+
             # 1. Ensure window is in 'Tabulka dat' mode
             try:
-                win = driver.find_element(By.CSS_SELECTOR, ".pnd-window")
                 tab_btn = win.find_element(By.XPATH, ".//button[@title='Tabulka dat']")
                 if "active" not in (tab_btn.get_attribute("class") or ""):
-                    tab_btn.click()
+                    driver.execute_script("arguments[0].click();", tab_btn)
                     time.sleep(1)
             except Exception:
                 pass
 
-            # 2. Select 'Včera' in 'Období'
+            # 2. Select 'Včera' in 'Období' in target window
             try:
-                dropdown_label = wait.until(
-                    EC.element_to_be_clickable((By.XPATH, "//label[contains(text(), 'Období')]"))
-                )
+                dropdown_label = win.find_element(By.XPATH, ".//label[contains(text(), 'Období')]")
                 dropdown_container = dropdown_label.find_element(
                     By.XPATH, "./following-sibling::div//div[contains(@class, 'multiselect__select')]"
                 )
-                dropdown_container.click()
+                driver.execute_script("arguments[0].click();", dropdown_container)
                 time.sleep(0.5)
 
-                option_vcera = wait.until(
-                    EC.element_to_be_clickable((
-                        By.XPATH,
-                        "//span[contains(text(), 'Včera') and contains(@class, 'multiselect__option')]",
-                    ))
+                option_vcera = win.find_element(
+                    By.XPATH,
+                    ".//span[contains(text(), 'Včera') and contains(@class, 'multiselect__option')]",
                 )
-                option_vcera.click()
+                driver.execute_script("arguments[0].click();", option_vcera)
                 time.sleep(0.5)
             except Exception as err:
                 raise PndScraperError("Failed to select 'Včera' period (ERR_SCRAPER)") from err
 
             # 3. Click 'Vyhledat data'
             self._click_search_data(driver, proc=proc, stop_event=stop_event, deadline=deadline)
+            time.sleep(2)
 
             # 4. Download 15-min interval range consumption (+A)
             range_cons = self._download_report_by_name(
@@ -1424,6 +1766,11 @@ class PndScraperClient:
             raise
         finally:
             if own_driver:
+                if self.enable_network_capture and driver:
+                    try:
+                        self._capture_network_traffic(driver, phase="scrape", hass_config_dir=hass_config_dir)
+                    except Exception as c_err:
+                        _LOGGER.debug("Network capture failed in scrape: %s", type(c_err).__name__)
                 self._safe_teardown(driver, proc)
 
     def download_custom_range(
@@ -1483,6 +1830,11 @@ class PndScraperClient:
             raise
         finally:
             if own_driver:
+                if self.enable_network_capture and driver:
+                    try:
+                        self._capture_network_traffic(driver, phase="scrape_range", hass_config_dir=hass_config_dir)
+                    except Exception as c_err:
+                        _LOGGER.debug("Network capture failed in scrape_range: %s", type(c_err).__name__)
                 self._safe_teardown(driver, proc)
 
     download_historical_data = download_custom_range
@@ -1593,21 +1945,57 @@ class PndScraperClient:
             xpath_parts.append(f".//a[contains(text(), '{cand}') and not(contains(@class, 'disabled'))]")
         link_xpath = " | ".join(xpath_parts)
 
+        target_win = self._get_target_window(driver)
+
         # Click report link
         try:
-            try:
-                link = wait.until(
-                    EC.presence_of_element_located((By.XPATH, link_xpath))
-                )
-            except Exception:
-                fallback_parts = []
+            link = None
+            if target_win is not driver:
                 for cand in candidates:
-                    fallback_parts.append(f".//a[contains(., '{cand}')]")
-                    fallback_parts.append(f".//span[contains(., '{cand}')]")
-                    fallback_parts.append(f".//a[contains(text(), '{cand}')]")
-                link = wait.until(
-                    EC.presence_of_element_located((By.XPATH, " | ".join(fallback_parts)))
-                )
+                    try:
+                        elems = target_win.find_elements(
+                            By.XPATH,
+                            f".//a[contains(., '{cand}') and not(contains(@class, 'disabled'))] | .//span[contains(., '{cand}') and not(contains(@class, 'disabled'))]"
+                        )
+                        for el in elems:
+                            if el.is_displayed():
+                                link = el
+                                break
+                        if link:
+                            break
+                    except Exception:
+                        pass
+
+            if link is None:
+                try:
+                    link = wait.until(
+                        EC.presence_of_element_located((By.XPATH, link_xpath))
+                    )
+                except Exception:
+                    fallback_parts = []
+                    for cand in candidates:
+                        fallback_parts.append(f".//a[contains(., '{cand}')]")
+                        fallback_parts.append(f".//span[contains(., '{cand}')]")
+                        fallback_parts.append(f".//a[contains(text(), '{cand}')]")
+                    if target_win is not driver:
+                        for cand in candidates:
+                            try:
+                                elems = target_win.find_elements(
+                                    By.XPATH,
+                                    f".//a[contains(., '{cand}')] | .//span[contains(., '{cand}')]"
+                                )
+                                for el in elems:
+                                    if el.is_displayed():
+                                        link = el
+                                        break
+                                if link:
+                                    break
+                            except Exception:
+                                pass
+                    if link is None:
+                        link = wait.until(
+                            EC.presence_of_element_located((By.XPATH, " | ".join(fallback_parts)))
+                        )
             try:
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", link)
                 time.sleep(0.5)
@@ -1640,11 +2028,12 @@ class PndScraperClient:
 
         # Click 'Exportovat data' -> 'CSV' scoped to the link's window container
         try:
-            container = None
-            try:
-                container = link.find_element(By.XPATH, "./ancestor::div[contains(@class, 'pnd-window')]")
-            except Exception:
-                pass
+            container = target_win if target_win is not driver else None
+            if container is None and link is not None:
+                try:
+                    container = link.find_element(By.XPATH, "./ancestor::div[contains(@class, 'pnd-window')]")
+                except Exception:
+                    pass
 
             toggle_xpath = (
                 ".//button[contains(., 'Exportovat data')] | .//button[contains(., 'Exportovat')]"

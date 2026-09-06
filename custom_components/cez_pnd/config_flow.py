@@ -30,8 +30,10 @@ from .client import (
     PndTimeoutError,
     validate_safe_path,
 )
+from .http_client import PndHttpClient
 from .const import (
     CONF_BROWSER_HEADLESS,
+    CONF_CLIENT_MODE,
     CONF_DEBUG_DIR,
     CONF_DEBUG_MODE,
     CONF_EAN,
@@ -40,6 +42,9 @@ from .const import (
     CONF_SCAN_TIME,
     CONF_TARIFF_ENTITY,
     CONF_USERNAME,
+    CLIENT_MODE_BROWSER,
+    CLIENT_MODE_HTTP,
+    DEFAULT_CLIENT_MODE,
     DEFAULT_DEBUG_DIR,
     DEFAULT_DEBUG_MODE,
     DEFAULT_SCAN_TIME,
@@ -94,13 +99,57 @@ async def _test_credentials(
     hass_or_user_input: Any,
     user_input: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Verify PND credentials and ELM under GLOBAL_BROWSER_SEMAPHORE with BrowserWorkerOwnership."""
+    """Verify PND credentials and ELM under appropriate client mode."""
     if user_input is None and isinstance(hass_or_user_input, dict):
         hass = None
         input_data = hass_or_user_input
     else:
         hass = hass_or_user_input
         input_data = user_input or {}
+
+    client_mode = input_data.get(CONF_CLIENT_MODE, CLIENT_MODE_BROWSER)
+
+    if client_mode == CLIENT_MODE_HTTP:
+        stop_event = threading.Event()
+        deadline = time.monotonic() + 175.0
+        temp_dir = tempfile.mkdtemp(prefix="cez_pnd_test_login_http_")
+        try:
+            async with asyncio.timeout(180):
+                hass_cfg = _get_hass_config_path(hass)
+                client = PndHttpClient(input_data)
+                if hass is not None and hasattr(hass, "async_add_executor_job"):
+                    worker_future = hass.async_add_executor_job(
+                        client.test_login,
+                        temp_dir,
+                        stop_event,
+                        deadline,
+                        hass_cfg,
+                    )
+                else:
+                    loop = asyncio.get_running_loop()
+                    worker_future = loop.run_in_executor(
+                        None,
+                        client.test_login,
+                        temp_dir,
+                        stop_event,
+                        deadline,
+                        hass_cfg,
+                    )
+                if inspect.isawaitable(worker_future) or isinstance(worker_future, (asyncio.Future, asyncio.Task)):
+                    await asyncio.shield(worker_future)
+                elif hasattr(worker_future, "result"):
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, worker_future.result)
+        except (TimeoutError, asyncio.TimeoutError, PndTimeoutError) as err:
+            stop_event.set()
+            raise PndTimeoutError("Časový limit pro ověření přihlašovacích údajů vypršel.") from err
+        except Exception:
+            stop_event.set()
+            raise
+        finally:
+            if temp_dir:
+                await _async_safe_remove_dir(hass, temp_dir)
+        return
 
     stop_event = threading.Event()
     deadline = time.monotonic() + 175.0
@@ -257,6 +306,13 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(CONF_PASSWORD): cv.string,
             vol.Required(CONF_EAN): cv.string,
             vol.Required(CONF_ELM): cv.string,
+            vol.Optional(CONF_CLIENT_MODE, default=DEFAULT_CLIENT_MODE): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[CLIENT_MODE_HTTP, CLIENT_MODE_BROWSER],
+                    translation_key="client_mode",
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
             vol.Optional(CONF_TARIFF_ENTITY): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "sensor"])
             ),
@@ -490,6 +546,16 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
             return current_options.get(key, current_data.get(key, default))
 
         schema = vol.Schema({
+            vol.Optional(
+                CONF_CLIENT_MODE,
+                default=get_val(CONF_CLIENT_MODE, DEFAULT_CLIENT_MODE),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[CLIENT_MODE_HTTP, CLIENT_MODE_BROWSER],
+                    translation_key="client_mode",
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
             vol.Optional(CONF_PASSWORD, default=""): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
             ),

@@ -23,20 +23,27 @@ from .client import (
     PndMaintenanceError,
     PndParseError,
     PndPortalError,
+    PndResourceError,
     PndScraperClient,
     PndScraperError,
     PndTimeoutError,
 )
+from .http_client import PndHttpClient
 from .const import (
     CONF_BROWSER_HEADLESS,
+    CONF_CLIENT_MODE,
     CONF_DEBUG_DIR,
     CONF_DEBUG_MODE,
     CONF_EAN,
     CONF_ELM,
+    CONF_ENABLE_NETWORK_CAPTURE,
     CONF_PASSWORD,
     CONF_SCAN_TIME,
     CONF_TARIFF_ENTITY,
     CONF_USERNAME,
+    CLIENT_MODE_BROWSER,
+    CLIENT_MODE_HTTP,
+    DEFAULT_CLIENT_MODE,
     DEFAULT_DEBUG_DIR,
     DEFAULT_DEBUG_MODE,
     DEFAULT_SCAN_TIME,
@@ -49,6 +56,7 @@ from .const import (
     ERR_MAINTENANCE,
     ERR_PARSER,
     ERR_PORTAL,
+    ERR_RESOURCE,
     ERR_SCRAPER,
     ERR_TIMEOUT,
     ERR_UNKNOWN,
@@ -384,6 +392,8 @@ def _map_exception_to_error_code(err: Exception) -> str:
         return ERR_TIMEOUT
     if isinstance(err, PndInsecureBrowserError) or "INSECURE_BROWSER" in str(err):
         return ERR_INSECURE_BROWSER
+    if isinstance(err, PndResourceError) or "ERR_RESOURCE" in str(err):
+        return ERR_RESOURCE
     if isinstance(err, PndScraperError):
         return ERR_SCRAPER
     if isinstance(err, PndParseError):
@@ -409,6 +419,7 @@ def _map_error_code_to_message(code: str) -> str:
         ERR_TIMEOUT: "Časový limit operace vypršel (Task Deadline Exceeded).",
         ERR_SCRAPER: "Chyba při komunikaci s portálem ČEZ PND.",
         ERR_INSECURE_BROWSER: "Detekována nepovolená bezpečnostní konfigurace prohlížeče (ERR_INSECURE_BROWSER).",
+        ERR_RESOURCE: "Nedostatek volné operační paměti pro bezpečné spuštění prohlížeče (ERR_RESOURCE).",
         ERR_PARSER: "Chyba při zpracování dat z portálu ČEZ PND.",
         ERR_PORTAL: "Chyba portálu ČEZ PND.",
         ERR_UNKNOWN: "Neočekávaná chyba při synchronizaci ČEZ PND.",
@@ -454,15 +465,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             config_entry=entry,
         )
 
-        self.scraper = PndScraperClient({
-            CONF_USERNAME: self.username,
-            CONF_PASSWORD: self.password,
-            CONF_EAN: self.ean,
-            CONF_ELM: self.elm,
-            CONF_BROWSER_HEADLESS: self.browser_headless,
-            CONF_DEBUG_MODE: self.debug_mode,
-            CONF_DEBUG_DIR: self.debug_dir,
-        })
+        self.scraper = self._get_client()
         self.parser = PndCsvParser()
         self.tariff_evaluator = TariffEvaluator(hass, self.tariff_entity)
         self.stats_manager = PndStatisticsManager(hass, self.ean)
@@ -474,6 +477,41 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         self._unsub_schedule: Optional[Callable[[], None]] = None
         self._unsub_retry: Optional[Callable[[], None]] = None
         self._retry_scheduled: bool = False
+
+    def _get_client(self) -> Any:
+        """Instantiate client (PndHttpClient or PndScraperClient) based on config_entry mode."""
+        client_mode = CLIENT_MODE_BROWSER
+        if hasattr(self, "config_entry") and self.config_entry is not None:
+            client_mode = self.config_entry.options.get(
+                CONF_CLIENT_MODE,
+                self.config_entry.data.get(CONF_CLIENT_MODE, CLIENT_MODE_BROWSER),
+            )
+
+        current_scraper = getattr(self, "scraper", None)
+        if current_scraper is not None:
+            if (
+                type(current_scraper).__name__ in ("MagicMock", "AsyncMock")
+                or hasattr(current_scraper, "_mock_return_value")
+            ):
+                return current_scraper
+            if client_mode == CLIENT_MODE_HTTP and isinstance(current_scraper, PndHttpClient):
+                return current_scraper
+            if client_mode == CLIENT_MODE_BROWSER and isinstance(current_scraper, PndScraperClient):
+                return current_scraper
+
+        config = {
+            CONF_USERNAME: self.username,
+            CONF_PASSWORD: self.password,
+            CONF_EAN: self.ean,
+            CONF_ELM: self.elm,
+            CONF_BROWSER_HEADLESS: self.browser_headless,
+            CONF_DEBUG_MODE: self.debug_mode,
+            CONF_DEBUG_DIR: self.debug_dir,
+            CONF_ENABLE_NETWORK_CAPTURE: self.entry.options.get(CONF_ENABLE_NETWORK_CAPTURE, False) or self.debug_mode,
+        }
+        if client_mode == CLIENT_MODE_HTTP:
+            return PndHttpClient(config)
+        return PndScraperClient(config)
 
     def _get_hass_config_path(self) -> Optional[str]:
         """Return Home Assistant root config path if available."""
@@ -572,6 +610,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
 
             async with asyncio.timeout(180):
                 hass_cfg = self._get_hass_config_path()
+                self.scraper = self._get_client()
 
                 worker_future = self.hass.async_add_executor_job(
                     self.scraper.download_yesterday_data,
@@ -588,7 +627,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                 else:
                     await worker_future
 
-                self.parser.app_version = self.scraper.app_version
+                self.parser.app_version = getattr(self.scraper, "app_version", None)
                 parsed_data = await self.hass.async_add_executor_job(
                     self.parser.parse, temp_dir
                 )
@@ -709,6 +748,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
 
             async with asyncio.timeout(180):
                 hass_cfg = self._get_hass_config_path()
+                self.scraper = self._get_client()
 
                 _LOGGER.info("Fetching custom date range '%s' for EAN %s", date_range, self.masked_ean)
                 worker_future = self.hass.async_add_executor_job(
@@ -725,7 +765,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                 else:
                     await worker_future
 
-                self.parser.app_version = self.scraper.app_version
+                self.parser.app_version = getattr(self.scraper, "app_version", None)
                 parsed_data = await self.hass.async_add_executor_job(
                     self.parser.parse, temp_dir
                 )

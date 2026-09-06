@@ -14,12 +14,20 @@ CONF_SCAN_TIME: Final = "scan_time"
 CONF_BROWSER_HEADLESS: Final = "browser_headless"
 CONF_DEBUG_MODE: Final = "debug_mode"
 CONF_DEBUG_DIR: Final = "debug_dir"
+CONF_ENABLE_NETWORK_CAPTURE: Final = "enable_network_capture"
+CONF_CLIENT_MODE: Final = "client_mode"
+
+# Client mode options
+CLIENT_MODE_HTTP: Final = "http"
+CLIENT_MODE_BROWSER: Final = "browser"
 
 # Default values
 DEFAULT_SCAN_TIME: Final = "06:00"
 DEFAULT_BROWSER_HEADLESS: Final = True
 DEFAULT_DEBUG_MODE: Final = False
+DEFAULT_ENABLE_NETWORK_CAPTURE: Final = False
 DEFAULT_DEBUG_DIR: Final = "/config/cez_pnd_debug"
+DEFAULT_CLIENT_MODE: Final = CLIENT_MODE_HTTP
 
 # URLs & Navigation Origin States (SEC07-03 & SEC08-02)
 URL_PND_LOGIN: Final = "https://pnd.cezdistribuce.cz/cezpnd2/external/dashboard/view"
@@ -110,7 +118,12 @@ ERR_SCRAPER: Final = "ERR_SCRAPER"
 ERR_INSECURE_BROWSER: Final = "ERR_INSECURE_BROWSER"
 ERR_PARSER: Final = "ERR_PARSER"
 ERR_PORTAL: Final = "ERR_PORTAL"
+ERR_RESOURCE: Final = "ERR_RESOURCE"
 ERR_UNKNOWN: Final = "ERR_UNKNOWN"
+
+# Browser resource and memory boundaries
+MIN_FREE_RAM_MB_FOR_BROWSER: Final[int] = 350
+BROWSER_V8_MAX_OLD_SPACE_MB: Final[int] = 256
 
 # Disallowed browser security flags (SEC10-03 / CWE-693 / CWE-250)
 DISALLOWED_BROWSER_FLAGS: Final[Tuple[str, ...]] = (
