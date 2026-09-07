@@ -59,6 +59,17 @@ from .coordinator import (
 
 _LOGGER = logging.getLogger(__name__)
 
+MAX_CREDENTIAL_LENGTH = 256
+
+
+def credentials_within_length_limit(user_input: Dict[str, Any]) -> bool:
+    """Return whether submitted credentials are within the accepted size limit."""
+    return all(
+        len(str(user_input.get(key, ""))) <= MAX_CREDENTIAL_LENGTH
+        for key in (CONF_USERNAME, CONF_PASSWORD)
+        if key in user_input
+    )
+
 
 def _get_hass_config_path(hass: Any) -> str:
     """Extract configuration directory path from HomeAssistant instance."""
@@ -266,7 +277,9 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             scan_time = str(user_input.get(CONF_SCAN_TIME, DEFAULT_SCAN_TIME)).strip()
 
             # 1. Regex validation of input formats
-            if not validate_ean(ean):
+            if not credentials_within_length_limit(user_input):
+                errors["base"] = "credentials_too_long"
+            elif not validate_ean(ean):
                 errors["base"] = "invalid_ean"
             elif not validate_elm(elm):
                 errors["base"] = "invalid_elm"
@@ -302,8 +315,8 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
 
         schema = vol.Schema({
-            vol.Required(CONF_USERNAME): cv.string,
-            vol.Required(CONF_PASSWORD): cv.string,
+            vol.Required(CONF_USERNAME): vol.All(cv.string, vol.Length(max=MAX_CREDENTIAL_LENGTH)),
+            vol.Required(CONF_PASSWORD): vol.All(cv.string, vol.Length(max=MAX_CREDENTIAL_LENGTH)),
             vol.Required(CONF_EAN): cv.string,
             vol.Required(CONF_ELM): cv.string,
             vol.Optional(CONF_CLIENT_MODE, default=DEFAULT_CLIENT_MODE): selector.SelectSelector(
@@ -344,23 +357,26 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             test_config = dict(entry.data)
             test_config[CONF_PASSWORD] = new_password
 
-            try:
-                await _test_credentials(self.hass, test_config)
-            except PndAuthError:
-                errors["base"] = "invalid_auth"
-            except PndCaptchaError:
-                errors["base"] = "captcha_detected"
-            except PndAccountLockedError:
-                errors["base"] = "account_locked"
-            except PndTimeoutError:
-                errors["base"] = "timeout"
-            except PndElmNotFoundError:
-                errors["base"] = "elm_not_found"
-            except PndMaintenanceError:
-                errors["base"] = "service_unavailable"
-            except Exception as err:
-                _LOGGER.error("Reauth verification failed: %s", type(err).__name__)
-                errors["base"] = "cannot_connect"
+            if not credentials_within_length_limit(user_input):
+                errors["base"] = "credentials_too_long"
+            else:
+                try:
+                    await _test_credentials(self.hass, test_config)
+                except PndAuthError:
+                    errors["base"] = "invalid_auth"
+                except PndCaptchaError:
+                    errors["base"] = "captcha_detected"
+                except PndAccountLockedError:
+                    errors["base"] = "account_locked"
+                except PndTimeoutError:
+                    errors["base"] = "timeout"
+                except PndElmNotFoundError:
+                    errors["base"] = "elm_not_found"
+                except PndMaintenanceError:
+                    errors["base"] = "service_unavailable"
+                except Exception as err:
+                    _LOGGER.error("Reauth verification failed: %s", type(err).__name__)
+                    errors["base"] = "cannot_connect"
 
             if not errors:
                 new_data = {**entry.data, CONF_PASSWORD: new_password}
@@ -394,13 +410,15 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             existing_ean = str(entry.data.get(CONF_EAN, "")).strip()
             submitted_ean = str(user_input.get(CONF_EAN, existing_ean)).strip()
 
-            if submitted_ean != existing_ean:
+            if not credentials_within_length_limit(user_input):
+                errors["base"] = "credentials_too_long"
+            elif submitted_ean != existing_ean:
                 errors["base"] = "cannot_change_ean"
 
             elm = str(user_input.get(CONF_ELM, entry.data.get(CONF_ELM, ""))).strip()
             scan_time = str(user_input.get(CONF_SCAN_TIME, DEFAULT_SCAN_TIME)).strip()
 
-            if "cannot_change_ean" in errors.values():
+            if errors:
                 pass
             elif not validate_elm(elm):
                 errors["base"] = "invalid_elm"
@@ -434,7 +452,7 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         current_data = entry.data if entry else {}
         schema = vol.Schema({
-            vol.Required(CONF_USERNAME, default=current_data.get(CONF_USERNAME, "")): cv.string,
+            vol.Required(CONF_USERNAME, default=current_data.get(CONF_USERNAME, "")): vol.All(cv.string, vol.Length(max=MAX_CREDENTIAL_LENGTH)),
             vol.Required(CONF_PASSWORD, default=current_data.get(CONF_PASSWORD, "")): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
             ),
@@ -490,7 +508,9 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
             debug_dir_val = user_input.get(CONF_DEBUG_DIR)
             debug_path_val = user_input.get("debug_path")
 
-            if scan_time and not validate_scan_time(scan_time):
+            if not credentials_within_length_limit(user_input):
+                errors["base"] = "credentials_too_long"
+            elif scan_time and not validate_scan_time(scan_time):
                 errors["base"] = "invalid_scan_time"
 
             debug_target = debug_dir_val if debug_dir_val is not None else debug_path_val

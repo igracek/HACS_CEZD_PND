@@ -35,10 +35,12 @@
     "error": {
       "cannot_connect": "Nepodařilo se navázat spojení s portálem ČEZ PND.",
       "cannot_change_ean": "Kód EAN nelze při přenastavení změnit. Pro změnu EAN přidejte novou integraci.",
+      "credentials_too_long": "Uživatelské jméno i heslo mohou mít nejvýše 256 znaků.",
       "invalid_auth": "Neplatné uživatelské jméno nebo heslo.",
       "invalid_ean": "Neplatný formát EAN kódu (musí obsahovat přesně 18 číslic).",
       "invalid_elm": "Neplatný formát čísla ELM (povoleny alfanumerické znaky, pomlčka a podtržítko, max 30 znaků).",
       "invalid_scan_time": "Neplatný formát času skenování (očekává se HH:MM).",
+      "credentials_too_long": "Nové heslo může mít nejvýše 256 znaků.",
       "invalid_debug_path": "Zadaná ladicí cesta je neplatná nebo leží mimo povolený kořen Home Assistant.",
       "invalid_debug_dir": "Zadaná ladicí složka je neplatná nebo leží mimo povolený kořen Home Assistant.",
       "captcha_detected": "Portál ČEZ PND vyžaduje ověření CAPTCHA.",

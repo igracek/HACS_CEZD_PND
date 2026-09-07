@@ -35,10 +35,12 @@
     "error": {
       "cannot_connect": "Failed to connect to CEZ PND portal.",
       "cannot_change_ean": "EAN cannot be modified during reconfiguration. To use a different EAN, add a new integration.",
+      "credentials_too_long": "Username and password must each be at most 256 characters.",
       "invalid_auth": "Invalid username or password.",
       "invalid_ean": "Invalid EAN code format (must contain exactly 18 digits).",
       "invalid_elm": "Invalid ELM number format (alphanumeric, dash, and underscore allowed, max 30 characters).",
       "invalid_scan_time": "Invalid scan time format (expected HH:MM).",
+      "credentials_too_long": "The new password must be at most 256 characters.",
       "invalid_debug_path": "The specified debug path is invalid or outside the allowed Home Assistant root directory.",
       "invalid_debug_dir": "The specified debug directory is invalid or outside the allowed Home Assistant root directory.",
       "captcha_detected": "CEZ PND portal requires CAPTCHA verification.",

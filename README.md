@@ -41,7 +41,7 @@ Pro spolehlivý běh integrace jsou vyžadovány:
 - **Home Assistant Core:** `2026.8.0+`
 - **Python:** `3.12+` / `3.14+`
 - **Python knihovny (spravováno v manifest.json):**
-  - `requests>=2.31.0`
+  - `requests>=2.32.0,<3.0.0`
   - `beautifulsoup4>=4.12.0,<5.0.0`
   - `selenium>=4.15.0,<5.0.0` (pouze pro režim prohlížeče)
 - **Volitelně pro režim prohlížeče (Chromium / Firefox):**
