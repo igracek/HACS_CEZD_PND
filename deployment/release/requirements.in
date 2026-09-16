@@ -1,0 +1,6 @@
+# Integration-owned requirements installed by Home Assistant.
+selenium==4.49.0
+beautifulsoup4==4.15.0
+
+# Runtime dependency provided and pinned by Home Assistant Core 2026.8.3.
+requests==2.34.2

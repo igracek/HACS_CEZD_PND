@@ -11,6 +11,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.service import async_register_admin_service
 
 from .const import (
     ATTR_DATE_RANGE,
@@ -113,7 +114,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             await coordinator.async_request_refresh()
 
     if not hass.services.has_service(DOMAIN, SERVICE_FETCH_DATA):
-        hass.services.async_register(
+        async_register_admin_service(
+            hass,
             DOMAIN,
             SERVICE_FETCH_DATA,
             handle_fetch_data,

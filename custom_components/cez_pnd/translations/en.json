@@ -87,7 +87,7 @@
   "services": {
     "fetch_data": {
       "name": "Fetch PND Data",
-      "description": "Trigger download from CEZ Distribuce Measured Data Portal.",
+      "description": "Trigger download from CEZ Distribuce Measured Data Portal. Only Home Assistant administrators can call this service.",
       "fields": {
         "ean": {
           "name": "EAN code",

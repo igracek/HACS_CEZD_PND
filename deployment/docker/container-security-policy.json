@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "policy": "cez-pnd-container-security-v1",
+  "container": {
+    "seccomp_profile": "docker-default",
+    "seccomp_override": false,
+    "privileged": false,
+    "no_new_privileges": true,
+    "capabilities_add": []
+  },
+  "browser": {
+    "user_must_be_non_root": true,
+    "sandbox_disabling_flags": []
+  }
+}

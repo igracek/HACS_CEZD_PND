@@ -27,6 +27,7 @@ DEFAULT_BROWSER_HEADLESS: Final = True
 DEFAULT_DEBUG_MODE: Final = False
 DEFAULT_ENABLE_NETWORK_CAPTURE: Final = False
 DEFAULT_DEBUG_DIR: Final = "/config/cez_pnd_debug"
+MAX_CSV_RESPONSE_SIZE: Final[int] = 5 * 1024 * 1024
 DEFAULT_CLIENT_MODE: Final = CLIENT_MODE_HTTP
 
 # URLs & Navigation Origin States (SEC07-03 & SEC08-02)
@@ -167,4 +168,3 @@ def mask_elm(elm: str) -> str:
     if len(clean) > 4:
         return f"***{clean[-4:]}"
     return "***"
-

@@ -67,6 +67,7 @@ from .models import SyncResult
 from .parser import PndCsvParser
 from .statistics import PndStatisticsManager
 from .tariff import TariffEvaluator
+from .fd_security import close_sealed_reports
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -142,6 +143,19 @@ def _is_future_done(future: Any) -> bool:
     return False
 
 
+def _close_future_report_result(future: Any) -> None:
+    """Release sealed reports returned after the coordinator stopped awaiting a worker."""
+    if future is None or not _is_future_done(future) or not hasattr(future, "result"):
+        return
+    try:
+        result = future.result()
+    except BaseException:
+        # A cancelled or failed worker owns no successful result to release.
+        return
+    if isinstance(result, dict):
+        close_sealed_reports(result.values())
+
+
 def _safe_remove_dir_sync(path: str) -> None:
     """Synchronously remove directory safely in executor thread (SEC10-04)."""
     try:
@@ -192,9 +206,16 @@ class BrowserWorkerOwnership:
         self._cleanup_scheduled: bool = False
         self._lock = threading.Lock()
 
-    def set_future(self, future: Any) -> None:
-        """Register running executor future."""
+    def set_future(self, future: Any) -> Any:
+        """Register and return a normalized worker future."""
+        if asyncio.iscoroutine(future):
+            try:
+                future = asyncio.get_running_loop().create_task(future)
+            except RuntimeError as err:
+                future.close()
+                raise RuntimeError("Coroutine workers require a running event loop") from err
         self.worker_future = future
+        return future
 
     def cleanup_sync(self, force: bool = False) -> None:
         """Synchronously release resources if worker thread has completed or not started without blocking event loop."""
@@ -208,6 +229,7 @@ class BrowserWorkerOwnership:
                 return
             self._released = True
 
+        _close_future_report_result(self.worker_future)
         target_dir = self.temp_dir
         if self.hass is None:
             _safe_remove_dir_sync(target_dir)
@@ -253,6 +275,7 @@ class BrowserWorkerOwnership:
                 return
             self._released = True
 
+        _close_future_report_result(self.worker_future)
         try:
             if self.temp_dir:
                 await _async_safe_remove_dir(self.hass, self.temp_dir)
@@ -590,14 +613,11 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         stop_event = threading.Event()
         deadline = time.monotonic() + 175.0
         ownership: Optional[BrowserWorkerOwnership] = None
+        downloaded_paths: Optional[Dict[str, object]] = None
 
         await GLOBAL_BROWSER_SEMAPHORE.acquire()
         try:
             temp_dir = tempfile.mkdtemp(prefix="cez_pnd_sync_")
-            try:
-                os.chmod(temp_dir, 0o777)
-            except Exception:
-                pass
             ownership = BrowserWorkerOwnership(
                 semaphore=GLOBAL_BROWSER_SEMAPHORE,
                 temp_dir=temp_dir,
@@ -619,17 +639,19 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     deadline,
                     hass_cfg,
                 )
-                ownership.set_future(worker_future)
+                worker_future = ownership.set_future(worker_future)
 
                 _LOGGER.debug("Downloading yesterday's PND data to %s", temp_dir)
                 if asyncio.iscoroutine(worker_future) or isinstance(worker_future, asyncio.Future):
-                    await asyncio.shield(worker_future)
+                    downloaded_paths = await asyncio.shield(worker_future)
                 else:
-                    await worker_future
+                    downloaded_paths = await worker_future
 
                 self.parser.app_version = getattr(self.scraper, "app_version", None)
                 parsed_data = await self.hass.async_add_executor_job(
-                    self.parser.parse, temp_dir
+                    self.parser.parse,
+                    temp_dir,
+                    downloaded_paths if isinstance(downloaded_paths, dict) else None,
                 )
 
                 _LOGGER.debug("Evaluating VT/NT tariff classification for %d intervals", len(parsed_data.intervals))
@@ -676,6 +698,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             raise UpdateFailed(err_msg) from err
 
         except Exception as err:
+            close_sealed_reports(downloaded_paths.values() if isinstance(downloaded_paths, dict) else None)
             stop_event.set()
 
             duration = round(time.time() - start_time, 2)
@@ -709,6 +732,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             raise
 
         finally:
+            close_sealed_reports(downloaded_paths.values() if isinstance(downloaded_paths, dict) else None)
             self.is_running = False
             if ownership is not None:
                 await ownership.async_release_or_schedule()
@@ -728,14 +752,11 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         stop_event = threading.Event()
         deadline = time.monotonic() + 175.0
         ownership: Optional[BrowserWorkerOwnership] = None
+        downloaded_paths: Optional[Dict[str, object]] = None
 
         await GLOBAL_BROWSER_SEMAPHORE.acquire()
         try:
             temp_dir = tempfile.mkdtemp(prefix="cez_pnd_range_")
-            try:
-                os.chmod(temp_dir, 0o777)
-            except Exception:
-                pass
             ownership = BrowserWorkerOwnership(
                 semaphore=GLOBAL_BROWSER_SEMAPHORE,
                 temp_dir=temp_dir,
@@ -759,15 +780,17 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     deadline,
                     hass_cfg,
                 )
-                ownership.set_future(worker_future)
+                worker_future = ownership.set_future(worker_future)
                 if asyncio.iscoroutine(worker_future) or isinstance(worker_future, asyncio.Future):
-                    await asyncio.shield(worker_future)
+                    downloaded_paths = await asyncio.shield(worker_future)
                 else:
-                    await worker_future
+                    downloaded_paths = await worker_future
 
                 self.parser.app_version = getattr(self.scraper, "app_version", None)
                 parsed_data = await self.hass.async_add_executor_job(
-                    self.parser.parse, temp_dir
+                    self.parser.parse,
+                    temp_dir,
+                    downloaded_paths if isinstance(downloaded_paths, dict) else None,
                 )
 
                 await self.tariff_evaluator.async_evaluate(parsed_data.intervals)
@@ -813,6 +836,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             raise HomeAssistantError(f"Fetch custom range failed: {err_msg}") from err
 
         except Exception as err:
+            close_sealed_reports(downloaded_paths.values() if isinstance(downloaded_paths, dict) else None)
             stop_event.set()
 
             duration = round(time.time() - start_time, 2)
@@ -835,6 +859,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             raise
 
         finally:
+            close_sealed_reports(downloaded_paths.values() if isinstance(downloaded_paths, dict) else None)
             self.is_running = False
             if ownership is not None:
                 await ownership.async_release_or_schedule()

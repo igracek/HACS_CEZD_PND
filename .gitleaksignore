@@ -1,0 +1,4 @@
+# Historical synthetic test fixtures retained for immutable-history coverage.
+# Each entry is an exact Gitleaks fingerprint; no path or commit-wide allowlist.
+e7b549fc8b1a7a3d7fcb761ea0b3789270ffb08e:tests/test_export_to_github_sec12.py:generic-api-key:97
+e7b549fc8b1a7a3d7fcb761ea0b3789270ffb08e:tests/test_export_to_github_sec12.py:github-pat:139

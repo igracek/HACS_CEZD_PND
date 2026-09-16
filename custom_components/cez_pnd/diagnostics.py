@@ -46,6 +46,42 @@ TO_REDACT = {
     "client_secret",
 }
 
+_SBOM_ROLES = {
+    "integration_direct",
+    "integration_transitive",
+    "ha_core_provided",
+    "shared_with_ha_core",
+}
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_EXPECTED_APPLICATION = {
+    "type": "application",
+    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.0",
+    "name": "HACS_CEZD_PND",
+    "version": "1.0.0",
+    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.0",
+}
+_EXPECTED_SBOM_CLOSURE = {
+    "attrs": ("26.1.0", "shared_with_ha_core"),
+    "beautifulsoup4": ("4.15.0", "integration_direct"),
+    "certifi": ("2026.7.22", "shared_with_ha_core"),
+    "charset-normalizer": ("3.4.3", "shared_with_ha_core"),
+    "h11": ("0.16.0", "integration_transitive"),
+    "idna": ("3.19", "shared_with_ha_core"),
+    "outcome": ("1.3.0.post0", "integration_transitive"),
+    "pysocks": ("1.7.1", "integration_transitive"),
+    "requests": ("2.34.2", "ha_core_provided"),
+    "selenium": ("4.49.0", "integration_direct"),
+    "sniffio": ("1.3.1", "integration_transitive"),
+    "sortedcontainers": ("2.4.0", "integration_transitive"),
+    "soupsieve": ("2.9.2", "integration_transitive"),
+    "trio": ("0.34.0", "integration_transitive"),
+    "trio-websocket": ("0.12.2", "integration_transitive"),
+    "typing-extensions": ("4.16.0", "shared_with_ha_core"),
+    "urllib3": ("2.7.0", "shared_with_ha_core"),
+    "websocket-client": ("1.9.2", "integration_transitive"),
+    "wsproto": ("1.3.2", "integration_transitive"),
+}
+
 
 def _get_pkg_version(package_name: str) -> str:
     """Bezpečně vrátí verzi instalovaného balíčku bez vyvolání výjimky a bez úniku cest."""
@@ -91,7 +127,7 @@ def _attest_dependencies_and_sbom(
     geckodriver_ver: str,
     sbom_path: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Attest runtime dependencies and browser runtime stack against release SBOM (SEC10-06 / CWE-1104, CWE-1357)."""
+    """Compare the runtime with the release SBOM without claiming live advisory safety."""
     if sbom_path is None:
         sbom_path = os.path.join(os.path.dirname(__file__), "sbom.json")
 
@@ -109,56 +145,127 @@ def _attest_dependencies_and_sbom(
             sbom_present = False
 
     components_map: dict[str, dict[str, Any]] = {}
-    if sbom_data and "components" in sbom_data:
-        for comp in sbom_data["components"]:
-            if isinstance(comp, dict) and "name" in comp:
-                components_map[comp["name"]] = comp
+    invalid_sbom = (
+        sbom_data.get("bomFormat") != "CycloneDX"
+        or sbom_data.get("specVersion") != "1.5"
+        or not isinstance(sbom_data.get("metadata"), dict)
+    )
+    components = sbom_data.get("components", [])
+    if not isinstance(components, list):
+        invalid_sbom = True
+        components = []
+    for comp in components:
+        if not isinstance(comp, dict) or not isinstance(comp.get("name"), str) or not isinstance(comp.get("version"), str):
+            invalid_sbom = True
+            continue
+        name = comp["name"]
+        version = comp["version"]
+        expected_ref = f"pkg:pypi/{name}@{version}"
+        hashes = comp.get("hashes")
+        sha256 = [
+            item.get("content")
+            for item in hashes if isinstance(item, dict) and item.get("alg") == "SHA-256"
+        ] if isinstance(hashes, list) else []
+        if (
+            name in components_map
+            or comp.get("bom-ref") != expected_ref
+            or comp.get("purl") != expected_ref
+            or len(sha256) != 1
+            or not isinstance(sha256[0], str)
+            or not _SHA256_RE.fullmatch(sha256[0])
+        ):
+            invalid_sbom = True
+        components_map[name] = comp
+
+    def _component_role(component: dict[str, Any]) -> str:
+        for prop in component.get("properties", []):
+            if isinstance(prop, dict) and prop.get("name") == "cez_pnd:dependency_role":
+                return str(prop.get("value", "unknown"))
+        return "unknown"
+
+    actual_closure = {
+        name: (str(component.get("version", "")), _component_role(component))
+        for name, component in components_map.items()
+    }
+    if actual_closure != _EXPECTED_SBOM_CLOSURE:
+        invalid_sbom = True
+    if any(role not in _SBOM_ROLES for _, role in actual_closure.values()):
+        invalid_sbom = True
+
+    metadata_component = sbom_data.get("metadata", {}).get("component", {})
+    if not isinstance(metadata_component, dict) or any(
+        metadata_component.get(key) != value for key, value in _EXPECTED_APPLICATION.items()
+    ):
+        invalid_sbom = True
+    app_ref = _EXPECTED_APPLICATION["bom-ref"]
+    component_refs = {component.get("bom-ref") for component in components_map.values()}
+    dependencies = sbom_data.get("dependencies")
+    graph: dict[str, set[str]] = {}
+    if not isinstance(app_ref, str) or not isinstance(dependencies, list):
+        invalid_sbom = True
+    else:
+        for dependency in dependencies:
+            if not isinstance(dependency, dict) or set(dependency) != {"ref", "dependsOn"}:
+                invalid_sbom = True
+                continue
+            ref = dependency.get("ref")
+            targets = dependency.get("dependsOn")
+            if (
+                not isinstance(ref, str)
+                or ref in graph
+                or not isinstance(targets, list)
+                or not all(isinstance(target, str) for target in targets)
+                or len(targets) != len(set(targets))
+            ):
+                invalid_sbom = True
+                continue
+            graph[ref] = set(targets)
+        expected_refs = component_refs | {app_ref}
+        if set(graph) != expected_refs or any(not targets.issubset(component_refs) for targets in graph.values()):
+            invalid_sbom = True
+        else:
+            reachable: set[str] = set()
+            pending = list(graph.get(app_ref, set()))
+            while pending:
+                ref = pending.pop()
+                if ref in reachable:
+                    continue
+                reachable.add(ref)
+                pending.extend(graph.get(ref, set()))
+            if reachable != component_refs:
+                invalid_sbom = True
+
+    metadata_properties: dict[str, str] = {}
+    for prop in sbom_data.get("metadata", {}).get("properties", []):
+        if isinstance(prop, dict) and isinstance(prop.get("name"), str):
+            metadata_properties[prop["name"]] = str(prop.get("value", ""))
+
+    supplied_versions = {
+        "selenium": installed_selenium,
+        "beautifulsoup4": installed_bs4,
+    }
+    dep_attestation: dict[str, Any] = {}
+    missing_detected = False
+    drift_detected = False
+    for pkg_name in sorted(components_map):
+        baseline_v = str(components_map[pkg_name]["version"])
+        installed_v = supplied_versions[pkg_name] if pkg_name in supplied_versions else _get_pkg_version(pkg_name)
+        missing = installed_v in ("not_installed", "unknown", "unavailable", "")
+        version_match = not missing and installed_v == baseline_v
+        missing_detected = missing_detected or missing
+        drift_detected = drift_detected or not version_match
+        dep_attestation[pkg_name] = {
+            "installed_version": installed_v,
+            "release_baseline": baseline_v,
+            "dependency_role": _component_role(components_map[pkg_name]),
+            "version_match": version_match,
+            "status": "missing" if missing else ("match" if version_match else "drift"),
+        }
 
     def _parse_version_tuple(v_str: str) -> tuple[int, ...]:
         clean = re.sub(r"[^\d.]", "", v_str.split()[0] if v_str else "")
-        parts = [int(p) for p in clean.split(".") if p.isdigit()]
+        parts = [int(part) for part in clean.split(".") if part.isdigit()]
         return tuple(parts) if parts else (0,)
-
-    dep_attestation: dict[str, Any] = {}
-    vulnerable_detected = False
-    drift_detected = False
-
-    for pkg_name, installed_v in [("selenium", installed_selenium), ("beautifulsoup4", installed_bs4)]:
-        comp = components_map.get(pkg_name, {})
-        baseline_v = comp.get("version", "unknown")
-        advisory_min = comp.get("advisory_min_version", "unknown")
-        max_exclusive = comp.get("max_version_exclusive", "unknown")
-
-        installed_tuple = _parse_version_tuple(installed_v)
-        advisory_tuple = _parse_version_tuple(advisory_min)
-        max_tuple = _parse_version_tuple(max_exclusive)
-
-        advisory_compliant = True
-        bounds_compliant = True
-
-        if installed_v in ("not_installed", "unknown"):
-            advisory_compliant = False
-            bounds_compliant = False
-        else:
-            if advisory_tuple != (0,) and installed_tuple < advisory_tuple:
-                advisory_compliant = False
-                vulnerable_detected = True
-            if max_tuple != (0,) and installed_tuple >= max_tuple:
-                bounds_compliant = False
-                drift_detected = True
-            if baseline_v != "unknown" and installed_v != baseline_v:
-                drift_detected = True
-
-        dep_attestation[pkg_name] = {
-            "installed_version": installed_v,
-            "attested_baseline": baseline_v,
-            "advisory_min_version": advisory_min,
-            "advisory_compliant": advisory_compliant,
-            "bounds_compliant": bounds_compliant,
-            "status": "compliant" if (advisory_compliant and bounds_compliant) else (
-                "vulnerable" if not advisory_compliant else "out_of_bounds"
-            ),
-        }
 
     browser_matrix = sbom_data.get("browser_runtime_matrix", {})
     chrome_tuple = _parse_version_tuple(chrome_ver)
@@ -197,14 +304,16 @@ def _attest_dependencies_and_sbom(
 
     if not sbom_present:
         overall_status = "missing_sbom"
-    elif vulnerable_detected:
-        overall_status = "vulnerable_dependency_detected"
+    elif invalid_sbom or not components_map:
+        overall_status = "invalid_sbom"
+    elif missing_detected:
+        overall_status = "dependency_missing"
     elif not driver_match:
         overall_status = "browser_stack_mismatch"
     elif drift_detected:
         overall_status = "drift_detected"
     else:
-        overall_status = "attested"
+        overall_status = "release_baseline_match"
 
     return {
         "sbom_present": sbom_present,
@@ -213,6 +322,12 @@ def _attest_dependencies_and_sbom(
         "sbom_sha256": sbom_sha256,
         "attestation_status": overall_status,
         "dependency_attestation": dep_attestation,
+        "advisory_snapshot": {
+            "resolved_at": metadata_properties.get("cez_pnd:baseline:resolved_at", "unknown"),
+            "semantics": metadata_properties.get("cez_pnd:advisory_semantics", "historical_snapshot_only"),
+            "live_check_performed": False,
+            "future_safety_guarantee": False,
+        },
         "browser_stack_attestation": browser_attestation,
     }
 

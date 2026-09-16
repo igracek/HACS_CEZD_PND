@@ -5,9 +5,17 @@ from enum import Enum
 import logging
 import math
 import os
-from typing import Any, Dict, Final, Iterator, List, Optional, Set, Tuple
+import stat
+from typing import Any, Dict, Final, Iterator, List, Optional, Set, Tuple, Union
 
 from .client import PndParseError, PndParserError
+from .fd_security import (
+    SealedReport,
+    SnapshotError,
+    bounded_sealed_snapshot,
+    close_sealed_reports,
+    verify_sealed_fd,
+)
 from .models import DailySummary, IntervalRecord, ParsedPndData
 
 _LOGGER = logging.getLogger(__name__)
@@ -114,12 +122,51 @@ INVALID_STATUSES: Final[Set[str]] = {
     "chyba mereni",
 }
 
+POWER_OUTAGE_INTERVAL_STATUSES: Final[Set[str]] = {
+    # PND status code 16: the portal reports a measured interval during a
+    # voltage outage.  Keep the interval for continuity, but mark it invalid
+    # so Recorder statistics do not treat the value as a reliable reading.
+    "naměřená data, výpadek napětí",
+    "namerena data, vypadek napeti",
+}
+
+VALID_ESTIMATE_INTERVAL_STATUSES: Final[Set[str]] = {
+    # PND status code 2 is explicitly documented as a valid estimate.
+    "platný odhad",
+    "platny odhad",
+}
+
+UNDEFINED_INTERVAL_STATUSES: Final[Set[str]] = {
+    # PND status code 64 carries no trustworthy validity semantics.  Treat it
+    # like an unavailable value so one row cannot discard the whole profile.
+    "nedefinovaný status",
+    "nedefinovany status",
+}
+
 # Explicit per-report semantic mapping contract
 REPORT_STATUS_SEMANTICS: Final[Dict[str, Dict[str, StatusSemantic]]] = {
     report_type: {
         **{s: StatusSemantic.VALID for s in VALID_STATUSES},
         **{s: StatusSemantic.PLACEHOLDER for s in PLACEHOLDER_STATUSES},
         **{s: StatusSemantic.INVALID for s in INVALID_STATUSES},
+        **(
+            {s: StatusSemantic.INVALID for s in POWER_OUTAGE_INTERVAL_STATUSES}
+            if report_type
+            in (REPORT_TYPE_INTERVAL_CONSUMPTION, REPORT_TYPE_INTERVAL_PRODUCTION)
+            else {}
+        ),
+        **(
+            {s: StatusSemantic.VALID for s in VALID_ESTIMATE_INTERVAL_STATUSES}
+            if report_type
+            in (REPORT_TYPE_INTERVAL_CONSUMPTION, REPORT_TYPE_INTERVAL_PRODUCTION)
+            else {}
+        ),
+        **(
+            {s: StatusSemantic.PLACEHOLDER for s in UNDEFINED_INTERVAL_STATUSES}
+            if report_type
+            in (REPORT_TYPE_INTERVAL_CONSUMPTION, REPORT_TYPE_INTERVAL_PRODUCTION)
+            else {}
+        ),
     }
     for report_type in SUPPORTED_REPORT_TYPES
 }
@@ -229,81 +276,160 @@ class PndCsvParser:
         self.duplicate_rows_count = 0
         self.total_rows_parsed = 0
 
-    def _stream_csv_rows(self, file_path: str) -> Iterator[List[str]]:
+    def _stream_csv_rows(self, file_path: Union[str, SealedReport]) -> Iterator[List[str]]:
         """Stream CSV rows generator with file size and hard limits without materializing full file."""
-        basename = os.path.basename(file_path)
-        if not os.path.isfile(file_path):
-            _LOGGER.debug("File does not exist: %s", basename)
-            return
+        basename = os.path.basename(
+            file_path.logical_name if isinstance(file_path, SealedReport) else file_path
+        )
+        descriptor = -1
+        snapshot_descriptor = -1
+        snapshot_owner: Optional[SealedReport] = None
+        if isinstance(file_path, SealedReport):
+            if file_path.size <= 0:
+                raise PndParseError(f"Soubor CSV '{basename}' je prázdný.")
+            if file_path.size > MAX_CSV_FILE_SIZE:
+                raise PndParseError(
+                    f"Soubor CSV '{basename}' překročil maximální limit 5 MB."
+                )
+            try:
+                snapshot_descriptor = file_path.duplicate_for_read()
+                size = file_path.size
+            except SnapshotError as err:
+                raise PndParseError("Sealed CSV report nelze bezpečně ověřit.") from err
+        else:
+            size = 0
+            path_stat = None
+            try:
+                path_stat = os.lstat(file_path)
+            except FileNotFoundError:
+                _LOGGER.debug("File does not exist: %s", basename)
+                return
+            except OSError as err:
+                raise PndParseError("CSV soubor nelze bezpečně otevřít.") from err
 
-        size = os.path.getsize(file_path)
-        if size > MAX_CSV_FILE_SIZE:
-            _LOGGER.error("Soubor CSV %s překročil maximální povolenou velikost 5 MB (%d bajtů)", basename, size)
-            raise PndParseError(f"Soubor CSV '{basename}' překročil maximální limit 5 MB.")
+            if not stat.S_ISREG(path_stat.st_mode) or not hasattr(os, "O_NOFOLLOW"):
+                raise PndParseError(f"CSV soubor '{basename}' není bezpečný regulární soubor.")
+            try:
+                descriptor = os.open(file_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW)
+                file_stat = os.fstat(descriptor)
+                if not stat.S_ISREG(file_stat.st_mode):
+                    raise PndParseError(f"CSV soubor '{basename}' není bezpečný regulární soubor.")
+                if (file_stat.st_dev, file_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+                    raise PndParseError("CSV soubor se během otevírání změnil.")
+                if file_stat.st_size > MAX_CSV_FILE_SIZE:
+                    _LOGGER.error("Soubor CSV %s překročil maximální povolenou velikost 5 MB (%d bajtů)", basename, file_stat.st_size)
+                    raise PndParseError(f"Soubor CSV '{basename}' překročil maximální limit 5 MB.")
+                try:
+                    snapshot_owner = bounded_sealed_snapshot(
+                        descriptor, MAX_CSV_FILE_SIZE, "cez-pnd-csv", logical_name=basename
+                    )
+                    snapshot_descriptor = snapshot_owner.fd
+                    size = snapshot_owner.size
+                except SnapshotError as err:
+                    if "exceeds" in str(err):
+                        raise PndParseError(f"Soubor CSV '{basename}' překročil maximální limit 5 MB.") from err
+                    raise PndParseError("CSV soubor se během bezpečného snapshotu změnil.") from err
+            except PndParseError:
+                if descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                raise
+            except OSError as err:
+                if descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                raise PndParseError("CSV soubor nelze bezpečně otevřít.") from err
 
         encodings = ["utf-8-sig", "utf-8", "cp1250", "iso-8859-2"]
-        for enc in encodings:
-            try:
-                with open(file_path, "r", encoding=enc, newline="") as f:
-                    # Detect delimiter safely
-                    sample = f.read(2048)
-                    f.seek(0)
-                    delimiter = ";" if ";" in sample else ","
-                    reader = csv.reader(f, delimiter=delimiter)
+        try:
+            for enc in encodings:
+                try:
+                    os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
+                    with os.fdopen(os.dup(snapshot_descriptor), "r", encoding=enc, newline="") as f:
+                        # Detect delimiter safely
+                        sample = f.read(2048)
+                        f.seek(0)
+                        delimiter = ";" if ";" in sample else ","
+                        reader = csv.reader(f, delimiter=delimiter)
 
-                    row_count = 0
-                    for row in reader:
-                        if not row or not any(cell.strip() for cell in row):
-                            continue
-                        row_count += 1
-                        if row_count > MAX_CSV_ROWS:
-                            _LOGGER.error(
-                                "Dosažen maximální limit %d řádků v CSV souboru %s.",
-                                MAX_CSV_ROWS,
-                                basename,
-                            )
-                            raise PndParseError(
-                                f"CSV soubor '{basename}' překročil maximální limit {MAX_CSV_ROWS} řádků."
-                            )
+                        row_count = 0
+                        for row in reader:
+                            if not row or not any(cell.strip() for cell in row):
+                                continue
+                            row_count += 1
+                            if row_count > MAX_CSV_ROWS:
+                                _LOGGER.error(
+                                    "Dosažen maximální limit %d řádků v CSV souboru %s.",
+                                    MAX_CSV_ROWS,
+                                    basename,
+                                )
+                                raise PndParseError(
+                                    f"CSV soubor '{basename}' překročil maximální limit {MAX_CSV_ROWS} řádků."
+                                )
 
-                        # Hard column limit
-                        if len(row) > MAX_CSV_COLS:
-                            _LOGGER.error(
-                                "Řádek %d má %d sloupců (limit %d) v CSV souboru %s.",
-                                row_count,
-                                len(row),
-                                MAX_CSV_COLS,
-                                basename,
-                            )
-                            raise PndParseError(
-                                f"Řádek {row_count} má {len(row)} sloupců, což překračuje limit {MAX_CSV_COLS} v souboru '{basename}'."
-                            )
+                            if len(row) > MAX_CSV_COLS:
+                                _LOGGER.error(
+                                    "Řádek %d má %d sloupců (limit %d) v CSV souboru %s.",
+                                    row_count,
+                                    len(row),
+                                    MAX_CSV_COLS,
+                                    basename,
+                                )
+                                raise PndParseError(
+                                    f"Řádek {row_count} má {len(row)} sloupců, což překračuje limit {MAX_CSV_COLS} v souboru '{basename}'."
+                                )
 
-                        # Cell length limit
-                        if any(len(cell) > MAX_CELL_LENGTH for cell in row):
-                            self.invalid_rows_count += 1
-                            _LOGGER.error(
-                                "Řádek %d v %s obsahuje buňku delší než %d znaků.",
-                                row_count,
-                                basename,
-                                MAX_CELL_LENGTH,
-                            )
-                            raise PndParseError(
-                                f"Řádek {row_count} v souboru '{basename}' obsahuje buňku delší než limit {MAX_CELL_LENGTH} znaků."
-                            )
+                            if any(len(cell) > MAX_CELL_LENGTH for cell in row):
+                                self.invalid_rows_count += 1
+                                _LOGGER.error(
+                                    "Řádek %d v %s obsahuje buňku delší než %d znaků.",
+                                    row_count,
+                                    basename,
+                                    MAX_CELL_LENGTH,
+                                )
+                                raise PndParseError(
+                                    f"Řádek {row_count} v souboru '{basename}' obsahuje buňku delší než limit {MAX_CELL_LENGTH} znaků."
+                                )
 
-                        yield row
+                            yield row
 
-                    self.detected_encoding = enc
-                    return
-            except UnicodeDecodeError as err:
-                _LOGGER.debug("Failed streaming %s with encoding %s: %s", basename, enc, err)
-                continue
+                        try:
+                            final_stat = os.fstat(snapshot_descriptor)
+                        except OSError as err:
+                            raise PndParseError("CSV soubor nelze bezpečně číst.") from err
+                        if final_stat.st_size != size:
+                            raise PndParseError("CSV soubor se během čtení změnil.")
+                        if final_stat.st_size > MAX_CSV_FILE_SIZE:
+                            raise PndParseError(f"Soubor CSV '{basename}' překročil maximální limit 5 MB.")
+                        self.detected_encoding = enc
+                        return
+                except UnicodeDecodeError as err:
+                    _LOGGER.debug("Failed streaming %s with encoding %s: %s", basename, enc, err)
+                    continue
+                except OSError as err:
+                    raise PndParseError("CSV soubor nelze bezpečně číst.") from err
 
-        _LOGGER.error("Failed to decode CSV file %s with all known encodings", basename)
-        raise PndParseError(f"Soubor CSV '{basename}' se nepodařilo dekódovat v žádném z podporovaných kódování.")
+            _LOGGER.error("Failed to decode CSV file %s with all known encodings", basename)
+            raise PndParseError(f"Soubor CSV '{basename}' se nepodařilo dekódovat v žádném z podporovaných kódování.")
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if snapshot_owner is not None:
+                snapshot_owner.close()
+            elif snapshot_descriptor >= 0 and snapshot_descriptor != descriptor:
+                try:
+                    os.close(snapshot_descriptor)
+                except OSError:
+                    pass
 
-    def _read_csv_file(self, file_path: str) -> List[List[str]]:
+    def _read_csv_file(self, file_path: Union[str, SealedReport]) -> List[List[str]]:
         """Compatibility wrapper returning list of rows from _stream_csv_rows."""
         return list(self._stream_csv_rows(file_path))
 
@@ -461,14 +587,16 @@ class PndCsvParser:
 
     def _parse_interval_file(
         self,
-        file_path: str,
+        file_path: Union[str, SealedReport],
         expected_profile: Optional[str] = None,
     ) -> Dict[datetime, Tuple[datetime, float, bool]]:
         """Parse 15-minute interval CSV file.
 
         Returns a dictionary mapping start_time -> (end_time, value_kwh, is_valid).
         """
-        basename = os.path.basename(file_path)
+        basename = os.path.basename(
+            file_path.logical_name if isinstance(file_path, SealedReport) else file_path
+        )
         results: Dict[datetime, Tuple[datetime, float, bool]] = {}
         row_stream = self._stream_csv_rows(file_path)
 
@@ -576,11 +704,13 @@ class PndCsvParser:
 
     def _parse_daily_file(
         self,
-        file_path: str,
+        file_path: Union[str, SealedReport],
         expected_profile: Optional[str] = None,
     ) -> Optional[Tuple[datetime, float]]:
         """Parse daily summary CSV file returning (date, total_kwh)."""
-        basename = os.path.basename(file_path)
+        basename = os.path.basename(
+            file_path.logical_name if isinstance(file_path, SealedReport) else file_path
+        )
         row_stream = self._stream_csv_rows(file_path)
         last_valid_result: Optional[Tuple[datetime, float]] = None
         daily_accum: Dict[Any, Tuple[datetime, float]] = {}
@@ -706,9 +836,53 @@ class PndCsvParser:
 
         return None
 
-    def parse(self, download_dir: str) -> ParsedPndData:
-        """Parse all downloaded CSV files in the download directory."""
-        consumption_file = self._find_file(
+    def parse(
+        self,
+        download_dir: str,
+        report_paths: Optional[Dict[str, Union[str, SealedReport]]] = None,
+    ) -> ParsedPndData:
+        """Parse reports and always release process-local browser report ownership."""
+        owned = [value for value in (report_paths or {}).values() if isinstance(value, SealedReport)]
+        seen_ids: Set[int] = set()
+        seen_inodes: Set[Tuple[int, int]] = set()
+        try:
+            for report in owned:
+                if id(report) in seen_ids:
+                    raise PndParseError("Sealed report ownership was reused.")
+                seen_ids.add(id(report))
+                if report.size <= 0:
+                    raise PndParseError("Sealed report je prázdný.")
+                if report.size > MAX_CSV_FILE_SIZE:
+                    raise PndParseError("Sealed report překročil maximální limit 5 MB.")
+                verify_sealed_fd(report.fd, report.size, report.digest)
+                report_stat = os.fstat(report.fd)
+                inode = (report_stat.st_dev, report_stat.st_ino)
+                if inode in seen_inodes:
+                    raise PndParseError("Sealed report descriptors alias one another.")
+                seen_inodes.add(inode)
+            return self._parse_impl(download_dir, report_paths)
+        finally:
+            close_sealed_reports(owned)
+
+    def _parse_impl(
+        self,
+        download_dir: str,
+        report_paths: Optional[Dict[str, Union[str, SealedReport]]] = None,
+    ) -> ParsedPndData:
+        """Parse downloaded CSV files, preferring paths returned by the downloader."""
+        def returned_path(key: str, fallback: str) -> Union[str, SealedReport]:
+            candidate = report_paths.get(key) if isinstance(report_paths, dict) else None
+            if isinstance(candidate, SealedReport):
+                return candidate
+            if (
+                isinstance(candidate, str)
+                and candidate.lower().endswith(".csv")
+                and os.path.abspath(os.path.dirname(candidate)) == os.path.abspath(download_dir)
+            ):
+                return candidate
+            return fallback
+
+        consumption_file = returned_path("range_consumption", "") or self._find_file(
             download_dir,
             [
                 "range-consumption.csv",
@@ -718,7 +892,7 @@ class PndCsvParser:
             ],
         ) or os.path.join(download_dir, "range-consumption.csv")
 
-        production_file = self._find_file(
+        production_file = returned_path("range_production", "") or self._find_file(
             download_dir,
             [
                 "range-production.csv",
@@ -728,7 +902,7 @@ class PndCsvParser:
             ],
         ) or os.path.join(download_dir, "range-production.csv")
 
-        daily_cons_file = self._find_file(
+        daily_cons_file = returned_path("daily_consumption", "") or self._find_file(
             download_dir,
             [
                 "daily-consumption.csv",
@@ -738,7 +912,7 @@ class PndCsvParser:
             ],
         ) or os.path.join(download_dir, "daily-consumption.csv")
 
-        daily_prod_file = self._find_file(
+        daily_prod_file = returned_path("daily_production", "") or self._find_file(
             download_dir,
             [
                 "daily-production.csv",
@@ -801,12 +975,14 @@ class PndCsvParser:
         # Parse daily summaries
         daily_cons = (
             self._parse_daily_file(daily_cons_file, expected_profile="+A")
-            if daily_cons_file and os.path.isfile(daily_cons_file)
+            if daily_cons_file
+            and (isinstance(daily_cons_file, SealedReport) or os.path.isfile(daily_cons_file))
             else None
         )
         daily_prod = (
             self._parse_daily_file(daily_prod_file, expected_profile="-A")
-            if daily_prod_file and os.path.isfile(daily_prod_file)
+            if daily_prod_file
+            and (isinstance(daily_prod_file, SealedReport) or os.path.isfile(daily_prod_file))
             else None
         )
 
@@ -835,7 +1011,9 @@ class PndCsvParser:
 
         # Diagnostic validation of interval count
         num_intervals = len(interval_records)
-        target_name = os.path.basename(consumption_file)
+        target_name = os.path.basename(
+            consumption_file.logical_name if isinstance(consumption_file, SealedReport) else consumption_file
+        )
         if num_intervals not in (96, 92, 100) and num_intervals % 96 != 0 and num_intervals > 0:
             _LOGGER.warning(
                 "Neočekávaný počet 15min intervalů v %s: získáno %d, očekáváno 96 (resp. 92/100 při DST nebo násobek pro období). "

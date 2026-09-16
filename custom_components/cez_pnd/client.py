@@ -3,14 +3,14 @@ from datetime import datetime, timedelta
 import json
 import logging
 import os
-import posixpath
 import re
 import shutil
+import stat
 import tempfile
 import threading
 import time
 from typing import Any, Dict, Final, List, Optional, Set, Tuple, Union
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 from .const import (
     ALLOWED_HOSTNAMES,
@@ -36,6 +36,7 @@ from .const import (
     ERR_RESOURCE,
     IDP_ALLOWED_HOSTNAMES,
     IDP_ALLOWED_ORIGINS,
+    MAX_CSV_RESPONSE_SIZE,
     MIN_FREE_RAM_MB_FOR_BROWSER,
     ORIGIN_STATE_APP,
     ORIGIN_STATE_AUTH,
@@ -48,8 +49,26 @@ from .const import (
     mask_ean,
     mask_elm,
 )
+from .url_security import matches_segment_prefix, normalize_url_path
+from .fd_security import (
+    SealedReport,
+    SnapshotError,
+    bounded_sealed_snapshot,
+    close_sealed_reports,
+    verify_sealed_fd,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _report_is_ready(value: object) -> bool:
+    if isinstance(value, SealedReport):
+        try:
+            verify_sealed_fd(value.fd, value.size, value.digest)
+            return value.size > 0
+        except SnapshotError:
+            return False
+    return isinstance(value, str) and os.path.isfile(value) and os.path.getsize(value) > 0
 
 
 class PndError(Exception):
@@ -845,11 +864,15 @@ class PndScraperClient:
         # Pre-flight host memory verification (OOM protection)
         verify_system_resources()
 
-        os.makedirs(download_dir, exist_ok=True)
+        os.makedirs(download_dir, mode=0o700, exist_ok=True)
         try:
-            os.chmod(download_dir, 0o777)
-        except Exception:
-            pass
+            # Browser profiles and downloaded reports can contain sensitive
+            # account data; never leave this per-run directory world-readable.
+            os.chmod(download_dir, 0o700)
+        except OSError as err:
+            raise PndScraperError(
+                "Nelze zabezpečit dočasný adresář pro stažení (ERR_SCRAPER)"
+            ) from err
         # Pre-launch environment and system config verification
         self._verify_effective_browser_security()
 
@@ -1030,44 +1053,71 @@ class PndScraperClient:
                 except OSError:
                     entries = []
 
-                candidates: List[Tuple[float, str]] = []
+                candidates: List[Tuple[float, str, bool]] = []
                 for f in entries:
                     if f in known_files:
                         continue
-                    if f.endswith((".crdownload", ".part", ".tmp")):
-                        continue
-                    if expected_extension and not f.lower().endswith(expected_extension.lower()):
+                    is_temporary = f.endswith((".crdownload", ".part", ".tmp"))
+                    if not is_temporary and expected_extension and not f.lower().endswith(expected_extension.lower()):
                         continue
                     if expected_pattern and not re.search(expected_pattern, f, re.IGNORECASE):
                         continue
 
                     full_path = os.path.join(download_dir, f)
                     try:
-                        if os.path.islink(full_path) or not os.path.isfile(full_path):
+                        path_stat = os.lstat(full_path)
+                        if not stat.S_ISREG(path_stat.st_mode):
+                            continue
+                        if min_mtime is not None and path_stat.st_mtime < threshold_mtime:
+                            continue
+                        if path_stat.st_size > MAX_CSV_RESPONSE_SIZE:
+                            raise PndScraperError(
+                                "Stažený report překračuje maximální velikost 5 MiB."
+                            )
+                        if path_stat.st_size <= 0:
                             continue
 
-                        st = os.stat(full_path)
-                        if min_mtime is not None and st.st_mtime < threshold_mtime:
-                            continue
-
-                        if st.st_size <= 0:
-                            continue
-
-                        candidates.append((st.st_mtime, full_path))
+                        candidates.append((path_stat.st_mtime, full_path, is_temporary))
                     except OSError:
                         continue
 
                 if candidates:
                     candidates.sort(key=lambda x: x[0])
                     candidate_path = candidates[-1][1]
+                    candidate_is_temporary = candidates[-1][2]
+                    descriptor = -1
                     try:
-                        size1 = os.path.getsize(candidate_path)
+                        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                        if not hasattr(os, "O_NOFOLLOW"):
+                            continue
+                        descriptor = os.open(candidate_path, flags | os.O_NOFOLLOW)
+                        file_stat = os.fstat(descriptor)
+                        if (
+                            not stat.S_ISREG(file_stat.st_mode)
+                            or file_stat.st_size <= 0
+                        ):
+                            continue
+                        if file_stat.st_size > MAX_CSV_RESPONSE_SIZE:
+                            raise PndScraperError(
+                                "Stažený report překračuje maximální velikost 5 MiB."
+                            )
+                        size1 = file_stat.st_size
                         time.sleep(0.1)
-                        size2 = os.path.getsize(candidate_path)
-                        if size1 == size2 and size1 > 0 and os.path.isfile(candidate_path) and not os.path.islink(candidate_path):
+                        size2 = os.fstat(descriptor).st_size
+                        if size2 > MAX_CSV_RESPONSE_SIZE:
+                            raise PndScraperError(
+                                "Stažený report překračuje maximální velikost 5 MiB."
+                            )
+                        if size1 == size2 and size2 > 0 and not candidate_is_temporary:
                             return candidate_path
                     except OSError:
                         pass
+                    finally:
+                        if descriptor >= 0:
+                            try:
+                                os.close(descriptor)
+                            except OSError:
+                                pass
 
             time.sleep(0.5)
         return None
@@ -1076,31 +1126,44 @@ class PndScraperClient:
         self,
         file_path: str,
         target_filename: str,
+        _descriptor: Optional[int] = None,
     ) -> None:
         """Validate downloaded report integrity, structure, encoding, and profile binding (SEC10-05)."""
-        if not file_path or not os.path.exists(file_path):
-            raise PndScraperError(f"Stažený soubor neexistuje: {file_path}")
+        if not file_path:
+            raise PndScraperError("Stažený soubor neexistuje.")
+        if _descriptor is None and not file_path.lower().endswith(".csv"):
+            raise PndScraperError("Stažený soubor nemá příponu .csv.")
 
-        if os.path.islink(file_path) or not os.path.isfile(file_path):
-            raise PndScraperError(f"Stažený artefakt není regulární soubor nebo jde o symlink: {file_path}")
-
+        owns_descriptor = _descriptor is None
+        if owns_descriptor:
+            descriptor, size = self._open_bounded_report(file_path)
+        else:
+            descriptor = _descriptor
+            try:
+                file_stat = os.fstat(descriptor)
+            except OSError as err:
+                raise PndScraperError("Nelze bezpečně ověřit stažený report.") from err
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise PndScraperError("Stažený artefakt není regulární soubor.")
+            size = file_stat.st_size
+            if size == 0:
+                raise PndScraperError("Stažený soubor je prázdný (0 B).")
+            if size > MAX_CSV_RESPONSE_SIZE:
+                raise PndScraperError("Stažený report překračuje maximální velikost 5 MiB.")
         try:
-            size = os.path.getsize(file_path)
-        except OSError as err:
-            raise PndScraperError(f"Nelze zjistit velikost staženého souboru: {err}") from err
-
-        if size == 0:
-            raise PndScraperError(f"Stažený soubor je prázdný (0 B): {file_path}")
-
-        if not file_path.lower().endswith(".csv"):
-            raise PndScraperError(f"Stažený soubor nemá příponu .csv: {file_path}")
-
-        chunk_size = min(size, 65536)
-        try:
-            with open(file_path, "rb") as f:
-                content_bytes = f.read(chunk_size)
-        except OSError as err:
-            raise PndScraperError(f"Chyba při čtení staženého reportu: {err}") from err
+            chunk_size = min(size, 65536)
+            try:
+                content_bytes = os.read(descriptor, chunk_size)
+                if os.fstat(descriptor).st_size > MAX_CSV_RESPONSE_SIZE:
+                    raise PndScraperError("Stažený report překračuje maximální velikost 5 MiB.")
+            except OSError as err:
+                raise PndScraperError("Chyba při bezpečném čtení staženého reportu.") from err
+        finally:
+            if owns_descriptor:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
         decoded_text: Optional[str] = None
         for enc in ("utf-8", "cp1250", "windows-1250", "iso-8859-2", "latin2"):
@@ -1149,6 +1212,138 @@ class PndScraperClient:
                     f"Neshoda profilu reportu: očekávána výroba (-A) pro {target_filename}, ale report obsahuje pouze spotřebu (+A)"
                 )
 
+    @staticmethod
+    def _open_bounded_report(file_path: str) -> Tuple[int, int]:
+        """Open a regular report without following symlinks and enforce its size limit."""
+        descriptor = -1
+        try:
+            path_stat = os.lstat(file_path)
+            if not stat.S_ISREG(path_stat.st_mode):
+                raise PndScraperError("Stažený artefakt není regulární soubor nebo jde o symlink.")
+            if not hasattr(os, "O_NOFOLLOW"):
+                raise PndScraperError("Bezpečné čtení staženého reportu není dostupné.")
+            descriptor = os.open(
+                file_path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+            )
+            file_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise PndScraperError("Stažený artefakt není regulární soubor nebo jde o symlink.")
+            if (file_stat.st_dev, file_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+                raise PndScraperError("Stažený report se během validace změnil.")
+            size = file_stat.st_size
+            if size == 0:
+                raise PndScraperError("Stažený soubor je prázdný (0 B).")
+            if size > MAX_CSV_RESPONSE_SIZE:
+                raise PndScraperError("Stažený report překračuje maximální velikost 5 MiB.")
+            return descriptor, size
+        except PndScraperError:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise
+        except OSError as err:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise PndScraperError("Nelze bezpečně otevřít stažený report.") from err
+
+    def _claim_report_snapshot(
+        self,
+        downloaded: str,
+        download_dir: str,
+        target_filename: str,
+    ) -> SealedReport:
+        """Validate a download and transfer ownership of its sealed snapshot FD."""
+        directory_fd = -1
+        source_fd = -1
+        snapshot_fd = -1
+        snapshot: Optional[SealedReport] = None
+        transferred = False
+        try:
+            if (
+                not hasattr(os, "O_NOFOLLOW")
+                or not hasattr(os, "O_DIRECTORY")
+            ):
+                raise PndScraperError("Bezpečný report snapshot není dostupný.")
+            directory_fd = os.open(
+                download_dir,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            )
+            directory_stat = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(directory_stat.st_mode)
+                or directory_stat.st_uid != os.getuid()
+                or directory_stat.st_mode & 0o077
+            ):
+                raise PndScraperError("Adresář stažených reportů nemá bezpečné vlastnosti.")
+
+            source_name = os.path.basename(downloaded)
+            if (
+                not source_name
+                or source_name in (".", "..")
+                or not source_name.lower().endswith(".csv")
+                or os.path.abspath(os.path.dirname(downloaded)) != os.path.abspath(download_dir)
+            ):
+                raise PndScraperError("Stažený report není v očekávaném adresáři.")
+            source_fd = os.open(
+                source_name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=directory_fd,
+            )
+            source_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise PndScraperError("Stažený report není regulární soubor.")
+            if "/" in target_filename or target_filename in ("", ".", ".."):
+                raise PndScraperError("Neplatný název cílového reportu.")
+
+            try:
+                snapshot = bounded_sealed_snapshot(
+                    source_fd,
+                    MAX_CSV_RESPONSE_SIZE,
+                    "cez-pnd-download",
+                    logical_name=target_filename,
+                )
+                snapshot_fd = snapshot.fd
+            except SnapshotError as err:
+                if "exceeds" in str(err):
+                    raise PndScraperError("Stažený report překračuje maximální velikost 5 MiB.") from err
+                raise PndScraperError("Stažený report se během kopírování změnil.") from err
+
+            self._validate_downloaded_report(
+                "<sealed-download-snapshot>", target_filename, _descriptor=snapshot.fd
+            )
+            os.lseek(snapshot.fd, 0, os.SEEK_SET)
+            snapshot_fd = -1
+            transferred = True
+            return snapshot
+        except PndScraperError:
+            raise
+        except OSError as err:
+            raise PndScraperError("Bezpečná publikace staženého reportu selhala.") from err
+        finally:
+            if source_fd >= 0:
+                try:
+                    os.close(source_fd)
+                except OSError:
+                    pass
+            if snapshot is not None and not transferred:
+                snapshot.close()
+            elif snapshot_fd >= 0:
+                try:
+                    os.close(snapshot_fd)
+                except OSError:
+                    pass
+            if directory_fd >= 0:
+                try:
+                    os.close(directory_fd)
+                except OSError:
+                    pass
+
     def _dismiss_cookie_banner(self, driver: Any) -> None:
         """Dismiss Cookiebot banner if present."""
         try:
@@ -1193,42 +1388,45 @@ class PndScraperClient:
 
         try:
             parts = urlsplit(str(current_url))
-            hostname = parts.hostname or ""
+            hostname = (parts.hostname or "").lower()
             is_valid = (
-                parts.scheme == "https"
+                parts.scheme.lower() == "https"
+                and parts.username is None
+                and parts.password is None
                 and hostname in allowed_hosts
                 and parts.port in (None, 443)
             )
 
             raw_path = parts.path or ""
-            decoded_path = unquote(raw_path) if raw_path else ""
-            norm_path = posixpath.normpath(decoded_path) if decoded_path else ""
-            if norm_path and not norm_path.startswith("/"):
-                norm_path = "/" + norm_path.lstrip("/")
-            elif not norm_path:
-                norm_path = "/"
+            norm_path = normalize_url_path(raw_path)
 
-            def _matches_segment_prefix(path: str, prefix: str) -> bool:
-                p = prefix.rstrip("/")
-                if not p:
-                    return True
-                return path == p or path.startswith(p + "/")
+            # Apply the same state/host path contract as the direct HTTP
+            # client. Explicit prefixes below can narrow this base contract,
+            # but never replace it (SEC14-01).
+            if state == ORIGIN_STATE_APP:
+                base_prefixes = (APP_PATH_PREFIX,)
+            else:
+                base_prefixes = AUTH_HOST_PATH_CONTRACTS.get(hostname, ())
+            if not raw_path or not base_prefixes or not any(
+                matches_segment_prefix(norm_path, prefix) for prefix in base_prefixes
+            ):
+                is_valid = False
 
             # 1. Check explicit expected_path_prefix
             if is_valid and expected_path_prefix is not None:
-                if not raw_path or not _matches_segment_prefix(norm_path, expected_path_prefix):
+                if not raw_path or not matches_segment_prefix(norm_path, expected_path_prefix):
                     is_valid = False
 
             # 2. Check explicit allowed_path_prefixes
             if is_valid and allowed_path_prefixes is not None:
                 prefixes = (allowed_path_prefixes,) if isinstance(allowed_path_prefixes, str) else tuple(allowed_path_prefixes)
-                if not raw_path or not any(_matches_segment_prefix(norm_path, p) for p in prefixes):
+                if not raw_path or not any(matches_segment_prefix(norm_path, p) for p in prefixes):
                     is_valid = False
 
             # 3. SEC10-07 (CWE-346): Enforce exact host/path contracts during credential entry (ORIGIN_STATE_CREDENTIALS / ORIGIN_STATE_IDP)
             if is_valid and state in (ORIGIN_STATE_CREDENTIALS, ORIGIN_STATE_IDP):
                 host_contracts = AUTH_HOST_PATH_CONTRACTS.get(hostname, CREDENTIAL_ENTRY_ALLOWED_PATH_PREFIXES)
-                if not raw_path or not any(_matches_segment_prefix(norm_path, p) for p in host_contracts):
+                if not raw_path or not any(matches_segment_prefix(norm_path, p) for p in host_contracts):
                     _LOGGER.error(
                         "Cesta '%s' na hostiteli '%s' neodpovídá povolenému kontraktu pro zadání credentials %s",
                         norm_path,
@@ -1655,10 +1853,17 @@ class PndScraperClient:
         deadline: Optional[float] = None,
         hass_config_dir: Optional[str] = None,
         driver: Optional[Any] = None,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Union[str, SealedReport]]:
         """Download yesterday's 15-minute intervals and daily summary reports."""
         own_driver = False
         proc = None
+        claimed_reports: List[SealedReport] = []
+
+        def remember(report: Union[str, SealedReport]) -> Union[str, SealedReport]:
+            if isinstance(report, SealedReport):
+                claimed_reports.append(report)
+            return report
+
         try:
             if driver is None:
                 driver = self._init_driver(download_dir)
@@ -1711,55 +1916,58 @@ class PndScraperClient:
             time.sleep(2)
 
             # 4. Download 15-min interval range consumption (+A)
-            range_cons = self._download_report_by_name(
+            range_cons = remember(self._download_report_by_name(
                 driver, download_dir, ["01 Profil spotřeby (+A)", "01 Profil spotřeby", "Profil spotřeby (+A)"], "range-consumption.csv",
                 proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-            )
+            ))
 
             # 5. Download 15-min interval range production (-A) (optional for consumption-only EANs)
             range_prod = ""
             try:
-                range_prod = self._download_report_by_name(
+                range_prod = remember(self._download_report_by_name(
                     driver, download_dir, ["02 Profil výroby (-A)", "02 Profil výroby", "Profil výroby (-A)"], "range-production.csv",
                     proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-                )
+                ))
             except PndScraperError as err:
                 _LOGGER.info("Range production report not available for this EAN (consumption-only): %s", err)
 
             # 6. Download Daily Consumption (+A)
             daily_cons = ""
             try:
-                daily_cons = self._download_report_by_name(
+                daily_cons = remember(self._download_report_by_name(
                     driver, download_dir, ["07 Profil spotřeby za den (+A)", "07 Profil spotřeby", "17 Registry za den (+E, -E)", "17 Registry za den"], "daily-consumption.csv",
                     proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-                )
+                ))
             except Exception as err:
                 _LOGGER.info("Daily summary report download note: %s", err)
 
             # 7. Download Daily Production (-A) (optional)
             daily_prod = ""
             try:
-                daily_prod = self._download_report_by_name(
+                daily_prod = remember(self._download_report_by_name(
                     driver, download_dir, ["08 Profil výroby za den (-A)", "08 Profil výroby"], "daily-production.csv",
                     proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-                )
+                ))
             except Exception as err:
                 _LOGGER.info("Daily production report not available for this EAN (consumption-only): %s", err)
 
             # SEC10-02 (CWE-252, CWE-682): Validate mandatory interval reports
-            if not range_cons or not os.path.isfile(range_cons) or os.path.getsize(range_cons) == 0:
+            if not _report_is_ready(range_cons):
                 raise PndScraperError("Mandatory report download failed: range-consumption.csv (ERR_SCRAPER)")
-            if range_prod and (not os.path.isfile(range_prod) or os.path.getsize(range_prod) == 0):
+            if range_prod and not _report_is_ready(range_prod):
                 raise PndScraperError("Mandatory report download failed: range-production.csv (ERR_SCRAPER)")
 
-            return {
+            result = {
                 "daily_consumption": daily_cons or os.path.join(download_dir, "daily-consumption.csv"),
                 "daily_production": daily_prod or "",
                 "range_consumption": range_cons,
                 "range_production": range_prod or "",
             }
+            claimed_reports = []
+            return result
 
         except Exception as err:
+            close_sealed_reports(claimed_reports)
             _LOGGER.error("Error during scraping CEZ PND portal: %s", type(err).__name__)
             if driver:
                 self._capture_debug_dump(driver, "scraping_failure", str(err), hass_config_dir=hass_config_dir)
@@ -1781,10 +1989,17 @@ class PndScraperClient:
         deadline: Optional[float] = None,
         hass_config_dir: Optional[str] = None,
         driver: Optional[Any] = None,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Union[str, SealedReport]]:
         """Download custom date range 15-minute interval and summary reports."""
         own_driver = False
         proc = None
+        claimed_reports: List[SealedReport] = []
+
+        def remember(report: Union[str, SealedReport]) -> Union[str, SealedReport]:
+            if isinstance(report, SealedReport):
+                claimed_reports.append(report)
+            return report
+
         try:
             if driver is None:
                 driver = self._init_driver(download_dir)
@@ -1800,30 +2015,33 @@ class PndScraperClient:
             self._verify_origin(driver, state=ORIGIN_STATE_APP, expected_path_prefix=APP_PATH_PREFIX)
 
             # Download range reports
-            range_cons = self._download_report_by_name(
+            range_cons = remember(self._download_report_by_name(
                 driver, download_dir, ["01 Profil spotřeby (+A)", "01 Profil spotřeby", "Profil spotřeby (+A)"], "range-consumption.csv",
                 proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-            )
+            ))
             range_prod = ""
             try:
-                range_prod = self._download_report_by_name(
+                range_prod = remember(self._download_report_by_name(
                     driver, download_dir, ["02 Profil výroby (-A)", "02 Profil výroby", "Profil výroby (-A)"], "range-production.csv",
                     proc=proc, stop_event=stop_event, deadline=deadline, hass_config_dir=hass_config_dir,
-                )
+                ))
             except PndScraperError as err:
                 _LOGGER.info("Range production report not available for this EAN (consumption-only): %s", err)
 
             # SEC10-02 (CWE-252, CWE-682): Validate mandatory historical report downloads
-            if not range_cons or not os.path.isfile(range_cons) or os.path.getsize(range_cons) == 0:
+            if not _report_is_ready(range_cons):
                 raise PndScraperError("Mandatory historical report download failed: range-consumption.csv (ERR_SCRAPER)")
-            if not range_prod or not os.path.isfile(range_prod) or os.path.getsize(range_prod) == 0:
+            if not _report_is_ready(range_prod):
                 raise PndScraperError("Mandatory historical report download failed: range-production.csv (ERR_SCRAPER)")
 
-            return {
+            result = {
                 "range_consumption": range_cons,
                 "range_production": range_prod or "",
             }
+            claimed_reports = []
+            return result
         except Exception as err:
+            close_sealed_reports(claimed_reports)
             _LOGGER.error("Error during custom range scraping: %s", type(err).__name__)
             if driver:
                 self._capture_debug_dump(driver, "custom_range_failure", str(err), hass_config_dir=hass_config_dir)
@@ -1912,8 +2130,8 @@ class PndScraperClient:
         stop_event: Optional[threading.Event] = None,
         deadline: Optional[float] = None,
         hass_config_dir: Optional[str] = None,
-    ) -> str:
-        """Find link by name, click Export -> CSV, and save with target_filename."""
+    ) -> Union[str, SealedReport]:
+        """Find link, validate its CSV, and publish it under a unique logical target name."""
         from selenium.webdriver.common.action_chains import ActionChains
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support import expected_conditions as EC
@@ -2095,18 +2313,15 @@ class PndScraperClient:
             deadline=deadline,
             expected_extension=".csv",
         )
-        target_path = os.path.join(download_dir, target_filename)
 
-        if downloaded and os.path.exists(downloaded):
+        if downloaded:
             self._verify_origin(driver, state=ORIGIN_STATE_APP, expected_path_prefix=APP_PATH_PREFIX)
+            claimed_report: Optional[SealedReport] = None
             try:
-                self._validate_downloaded_report(downloaded, target_filename)
+                claimed_report = self._claim_report_snapshot(downloaded, download_dir, target_filename)
+                self._verify_origin(driver, state=ORIGIN_STATE_APP, expected_path_prefix=APP_PATH_PREFIX)
             except Exception as err:
-                try:
-                    if os.path.exists(downloaded):
-                        os.remove(downloaded)
-                except OSError:
-                    pass
+                close_sealed_reports([claimed_report])
                 _LOGGER.error("Downloaded report failed validation for '%s': %s", target_filename, err)
                 if self.debug_mode:
                     self._capture_debug_dump(
@@ -2119,11 +2334,8 @@ class PndScraperClient:
                     f"Downloaded report failed validation for '{target_filename}': {err}"
                 ) from err
 
-            # Atomically replace target_path
-            os.replace(downloaded, target_path)
-            self._verify_origin(driver, state=ORIGIN_STATE_APP, expected_path_prefix=APP_PATH_PREFIX)
             _LOGGER.debug("Downloaded %s as %s", link_text, target_filename)
-            return target_path
+            return claimed_report
 
         _LOGGER.warning("No new file was saved for report '%s'", link_text)
         if self.debug_mode:

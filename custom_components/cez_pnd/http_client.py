@@ -1,16 +1,21 @@
 """Direct HTTP client for CEZ Distribuce PND portal (browserless mode)."""
+import codecs
 from datetime import datetime, timedelta
+import json
 import logging
 import os
 import re
-import tempfile
+import secrets
+import stat
 import threading
 import time
+from collections.abc import Mapping
 from typing import Any, Dict, Final, List, Optional, Protocol, Tuple, Union
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
+from urllib3.util import Timeout as Urllib3Timeout
 
 from .client import (
     PndAccountLockedError,
@@ -26,8 +31,8 @@ from .client import (
 )
 from .const import (
     ALLOWED_HOSTNAMES_BY_STATE,
-    ALLOWED_ORIGINS_BY_STATE,
     APP_PATH_PREFIX,
+    AUTH_HOST_PATH_CONTRACTS,
     CONF_DEBUG_DIR,
     CONF_DEBUG_MODE,
     CONF_EAN,
@@ -37,6 +42,7 @@ from .const import (
     DEFAULT_DEBUG_DIR,
     DEFAULT_DEBUG_MODE,
     IDP_ALLOWED_HOSTNAMES,
+    MAX_CSV_RESPONSE_SIZE,
     ORIGIN_STATE_APP,
     ORIGIN_STATE_AUTH,
     ORIGIN_STATE_CREDENTIALS,
@@ -47,10 +53,39 @@ from .const import (
     mask_ean,
     mask_elm,
 )
+from .fd_security import SealedReport
+from .url_security import matches_segment_prefix, normalize_url_path
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT: Final[Tuple[int, int]] = (10, 30)
+MAX_REDIRECTS: Final = 8
+CSV_STREAM_CHUNK_SIZE: Final = 64 * 1024
+MAX_AUTH_RESPONSE_SIZE: Final = 512 * 1024
+MAX_DASHBOARD_RESPONSE_SIZE: Final = 256 * 1024
+MAX_METERS_RESPONSE_SIZE: Final = 256 * 1024
+MAX_DASHBOARD_ITEMS: Final = 256
+HTTP_STREAM_CHUNK_SIZE: Final = 64 * 1024
+MAX_CONTENT_LENGTH_DIGITS: Final = 20
+METER_ELM_FIELDS: Final = ("elm", "electrometerId", "id")
+METER_EAN_FIELD: Final = "ean"
+METER_METADATA_FIELDS: Final = ("meters", "devices", "electrometers")
+# ``requests`` does not enforce urllib3's ``total`` timeout while a streamed
+# body is consumed.  Keep each blocking socket read short so the cooperative
+# deadline check between chunks can overrun the operation budget by at most a
+# small, deterministic interval.
+STREAM_READ_TIMEOUT_SLICE: Final = 0.5
+REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
+CSV_CONTENT_TYPES: Final = frozenset(
+    {
+        "application/csv",
+        "application/octet-stream",
+        "application/vnd.ms-excel",
+        "text/csv",
+        "text/plain",
+    }
+)
+OPTIONAL_REPORT_HTTP_STATUSES: Final = frozenset({204, 404, 410})
 DEFAULT_USER_AGENT: Final = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -71,6 +106,71 @@ ASSEMBLY_DAILY_CONSUMPTION: Final = "-1021"
 ASSEMBLY_DAILY_PRODUCTION: Final = "-1022"
 
 
+def _normalize_dashboard_payload(payload: Any) -> Dict[str, Any]:
+    """Normalize the current dashboard list response without trusting it.
+
+    The legacy dashboard response is intentionally returned unchanged so its
+    existing validation/selection behavior remains intact.  The current
+    response is a bounded list of window records; only the scalar fields used
+    by the HTTP client are accepted and copied into a minimal supported
+    metadata shape.
+    """
+    if isinstance(payload, dict):
+        return payload
+    if not isinstance(payload, list):
+        raise PndParseError("Dashboard metadata has an invalid shape (ERR_PORTAL)")
+    if not payload or len(payload) > MAX_DASHBOARD_ITEMS:
+        raise PndParseError("Dashboard metadata has an invalid list size (ERR_PORTAL)")
+
+    device_sets: set[int] = set()
+    electrometers: List[str] = []
+    seen_electrometers: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            raise PndParseError("Dashboard metadata contains a non-object record (ERR_PORTAL)")
+
+        if "idDeviceSet" not in item:
+            raise PndParseError("Dashboard metadata contains a missing device set (ERR_PORTAL)")
+        device_set = item["idDeviceSet"]
+        if device_set is not None:
+            if isinstance(device_set, bool) or not isinstance(device_set, int):
+                raise PndParseError("Dashboard metadata contains an invalid device set (ERR_PORTAL)")
+            if device_set <= 0:
+                raise PndParseError("Dashboard metadata contains an invalid device set (ERR_PORTAL)")
+            device_sets.add(device_set)
+
+        electrometer = item.get("electrometerId")
+        if electrometer is not None and not isinstance(electrometer, str):
+            raise PndParseError("Dashboard metadata contains an invalid identifier (ERR_PORTAL)")
+        if isinstance(electrometer, str):
+            electrometer = electrometer.strip()
+            if electrometer:
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,30}", electrometer):
+                    raise PndParseError("Dashboard metadata contains an invalid identifier (ERR_PORTAL)")
+                if electrometer not in seen_electrometers:
+                    seen_electrometers.add(electrometer)
+                    electrometers.append(electrometer)
+
+    if len(device_sets) != 1:
+        raise PndParseError("Dashboard metadata contains a missing or conflicting device set (ERR_PORTAL)")
+
+    return {
+        "idDeviceSet": next(iter(device_sets)),
+        "electrometers": [{"electrometerId": value} for value in electrometers],
+    }
+
+
+class _BoundedResponseText(str):
+    """String response carrying immutable-per-read diagnostic metadata."""
+
+    pnd_metadata: Dict[str, Any]
+
+    def __new__(cls, value: str, metadata: Dict[str, Any]) -> "_BoundedResponseText":
+        instance = super().__new__(cls, value)
+        instance.pnd_metadata = dict(metadata)
+        return instance
+
+
 class PndClientProtocol(Protocol):
     """Protocol defining the interface for PND clients (HTTP and Browser)."""
 
@@ -85,14 +185,13 @@ class PndClientProtocol(Protocol):
     ) -> Tuple[bool, str, List[str]]:
         """Test login credentials and configured ELM."""
         ...
-
     def download_yesterday_data(
         self,
         download_dir: str,
         stop_event: Optional[threading.Event] = None,
         deadline: Optional[float] = None,
         hass_config_dir: Optional[str] = None,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Union[str, SealedReport]]:
         """Download yesterday's consumption and production data."""
         ...
 
@@ -103,9 +202,13 @@ class PndClientProtocol(Protocol):
         stop_event: Optional[threading.Event] = None,
         deadline: Optional[float] = None,
         hass_config_dir: Optional[str] = None,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Union[str, SealedReport]]:
         """Download custom range consumption and production data."""
         ...
+
+
+class PndReportUnavailableError(PndPortalError):
+    """An optional report is explicitly unavailable for this account."""
 
 
 class PndHttpClient:
@@ -123,6 +226,67 @@ class PndHttpClient:
         self.debug_dir = config.get(CONF_DEBUG_DIR, DEFAULT_DEBUG_DIR)
         self.app_version: Optional[str] = "PND 2.0"
         self.last_debug_artifacts: List[str] = []
+
+    @staticmethod
+    def _safe_mime_type(content_type: Any) -> str:
+        """Return a conservative media type without exposing header content."""
+        if not isinstance(content_type, str):
+            return "unknown"
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", media_type):
+            return media_type
+        return "unknown"
+
+    def _safe_endpoint_label(self, url: Any) -> str:
+        """Build an allowlisted host/path label, omitting query and fragment."""
+        allowed_hosts = {
+            hostname
+            for hostnames in ALLOWED_HOSTNAMES_BY_STATE.values()
+            for hostname in hostnames
+        }
+        try:
+            parsed = urlsplit(str(url))
+            hostname = (parsed.hostname or "").lower()
+            if (
+                parsed.scheme.lower() != "https"
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.port not in (None, 443)
+                or hostname not in allowed_hosts
+            ):
+                return "unknown"
+            normalized_path = normalize_url_path(parsed.path or "/")
+            allowed_prefixes = AUTH_HOST_PATH_CONTRACTS.get(hostname, ())
+            if not any(
+                matches_segment_prefix(normalized_path, prefix)
+                for prefix in allowed_prefixes
+            ):
+                return "unknown"
+            return f"{hostname}{normalized_path}"
+        except (TypeError, ValueError):
+            return "unknown"
+
+    def _debug_http_event(self, stage: str, method: str, endpoint_url: Any,
+                          status: Any = "unknown", redirect_index: Any = "unknown",
+                          **fields: Any) -> None:
+        """Emit safe, bounded diagnostics only when explicitly debug-enabled."""
+        if not bool(self.debug_mode):
+            return
+        safe_method = method.upper() if isinstance(method, str) else "UNKNOWN"
+        if safe_method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+            safe_method = "UNKNOWN"
+        safe_status = status if isinstance(status, int) and 100 <= status <= 599 else "unknown"
+        safe_index = redirect_index if isinstance(redirect_index, int) and redirect_index >= 0 else "unknown"
+        safe_fields = {"stage": stage, "method": safe_method,
+                       "endpoint": self._safe_endpoint_label(endpoint_url),
+                       "status": safe_status, "redirect_index": safe_index}
+        for name, value in fields.items():
+            if name in {"mime", "shape", "report_kind", "exception_type"}:
+                safe_fields[name] = value if isinstance(value, str) else "unknown"
+            elif name in {"bytes", "body_bytes", "body_characters", "item_count", "declared_bytes"}:
+                safe_fields[name] = value if isinstance(value, int) and value >= 0 else "unknown"
+        details = " ".join(f"{key}={value}" for key, value in safe_fields.items())
+        _LOGGER.warning("HTTP debug %s", details)
 
     def _mask_sensitive(self, text: str) -> str:
         """Mask sensitive data in strings for logging and debugging."""
@@ -148,15 +312,157 @@ class PndHttpClient:
         )
         return masked
 
+    @staticmethod
+    def _matches_segment_prefix(path: str, prefix: str) -> bool:
+        """Return whether path equals a prefix or starts at its next segment."""
+        return matches_segment_prefix(path, prefix)
+
     def _verify_origin(self, url: str, state: str) -> None:
-        """Validate URL origin against allowed hosts for given navigation state (CWE-346)."""
-        parsed = urlparse(url)
-        hostname = parsed.hostname or ""
-        allowed_hosts = ALLOWED_HOSTNAMES_BY_STATE.get(state, ())
-        if allowed_hosts and hostname not in allowed_hosts:
-            msg = f"Insecure redirect host '{hostname}' in state '{state}' (allowed: {allowed_hosts})"
-            _LOGGER.error(self._mask_sensitive(msg))
-            raise PndAuthError("Insecure redirect host detected (ERR_AUTH)")
+        """Validate HTTPS origin and state-specific path contract (CWE-346)."""
+        allowed_hosts = ALLOWED_HOSTNAMES_BY_STATE.get(state)
+        if allowed_hosts is None:
+            raise PndAuthError("Invalid navigation state (ERR_AUTH)")
+
+        try:
+            parsed = urlsplit(str(url))
+            hostname = (parsed.hostname or "").lower()
+            if (
+                parsed.scheme.lower() != "https"
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.port not in (None, 443)
+                or hostname not in allowed_hosts
+            ):
+                raise ValueError("origin mismatch")
+
+            raw_path = parsed.path or "/"
+            normalized_path = normalize_url_path(raw_path)
+
+            if state == ORIGIN_STATE_APP:
+                prefixes = (APP_PATH_PREFIX,)
+            else:
+                prefixes = AUTH_HOST_PATH_CONTRACTS.get(hostname, ())
+            if not prefixes or not any(
+                matches_segment_prefix(normalized_path, prefix)
+                for prefix in prefixes
+            ):
+                raise ValueError("path contract mismatch")
+        except (TypeError, ValueError):
+            _LOGGER.error(
+                "Rejected URL outside navigation contract for state '%s'",
+                state,
+            )
+            raise PndAuthError("Insecure redirect or URL detected (ERR_AUTH)") from None
+
+    @staticmethod
+    def _response_url(response: requests.Response, requested_url: str) -> str:
+        """Return a concrete response URL, tolerating minimal test doubles."""
+        response_url = getattr(response, "url", None)
+        return response_url if isinstance(response_url, str) and response_url else requested_url
+
+    @staticmethod
+    def _validate_download_directory(download_dir: str) -> Tuple[int, int]:
+        """Require a real, owner-controlled directory and return its identity."""
+        try:
+            directory_stat = os.lstat(download_dir)
+        except OSError as err:
+            raise PndPortalError("Report directory is unavailable (ERR_PORTAL)") from err
+        if (
+            not stat.S_ISDIR(directory_stat.st_mode)
+            or stat.S_ISLNK(directory_stat.st_mode)
+            or directory_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(directory_stat.st_mode) & 0o022
+        ):
+            raise PndPortalError("Report directory is not owner-controlled (ERR_PORTAL)")
+        return directory_stat.st_dev, directory_stat.st_ino
+
+    @classmethod
+    def _open_download_directory(cls, download_dir: str) -> Tuple[int, Tuple[int, int]]:
+        """Open a verified directory descriptor immune to later path swaps."""
+        identity = cls._validate_download_directory(download_dir)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            directory_fd = os.open(download_dir, flags)
+        except OSError as err:
+            raise PndPortalError("Report directory cannot be opened safely (ERR_PORTAL)") from err
+        descriptor_stat = os.fstat(directory_fd)
+        if (
+            (descriptor_stat.st_dev, descriptor_stat.st_ino) != identity
+            or not stat.S_ISDIR(descriptor_stat.st_mode)
+            or descriptor_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(descriptor_stat.st_mode) & 0o022
+        ):
+            os.close(directory_fd)
+            raise PndPortalError("Report directory changed during validation (ERR_PORTAL)")
+        return directory_fd, identity
+
+    def _request_with_safe_redirects(
+        self,
+        session: requests.Session,
+        method: str,
+        url: str,
+        state: str,
+        stop_event: Optional[threading.Event] = None,
+        deadline: Optional[float] = None,
+        *,
+        credential_request: bool = False,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Follow a bounded, prevalidated redirect chain without credential replay."""
+        current_method = method.upper()
+        current_url = url
+        request_kwargs = dict(kwargs)
+
+        for redirect_count in range(MAX_REDIRECTS + 1):
+            self._verify_origin(current_url, state)
+            request_kwargs["allow_redirects"] = False
+            response = self._safe_request(session, current_method, current_url,
+                                          stop_event, deadline, **request_kwargs)
+            try:
+                response_url = self._response_url(response, current_url)
+                self._verify_origin(response_url, state)
+            except Exception:
+                response.close()
+                raise
+            status = response.status_code
+            try:
+                setattr(response, "_pnd_redirect_index", redirect_count)
+                setattr(response, "_pnd_request_method", current_method)
+            except Exception:
+                pass
+            self._debug_http_event(
+                "response", current_method, response_url, status, redirect_count,
+            )
+            if status not in REDIRECT_STATUSES:
+                return response
+            if redirect_count >= MAX_REDIRECTS:
+                response.close()
+                raise PndAuthError("Too many authentication redirects (ERR_AUTH)")
+
+            location = response.headers.get("Location")
+            if not location:
+                response.close()
+                raise PndAuthError("Authentication redirect omitted Location (ERR_AUTH)")
+            next_url = urljoin(current_url, location)
+            response.close()
+            self._verify_origin(next_url, state)
+
+            if credential_request and status in (307, 308):
+                raise PndAuthError("Unsafe credential-preserving redirect rejected (ERR_AUTH)")
+
+            # RFC-compatible POST redirect handling without retaining the body.
+            if current_method == "POST" and status in (301, 302, 303):
+                current_method = "GET"
+                request_kwargs.pop("data", None)
+                request_kwargs.pop("json", None)
+                headers = dict(request_kwargs.get("headers", {}))
+                headers.pop("Content-Type", None)
+                request_kwargs["headers"] = headers
+                credential_request = False
+            request_kwargs.pop("params", None)
+            current_url = next_url
+
+        raise PndAuthError("Too many authentication redirects (ERR_AUTH)")
 
     def _check_deadline_and_stop(
         self,
@@ -166,7 +472,7 @@ class PndHttpClient:
         """Check if operation has been cancelled or deadline exceeded."""
         if stop_event is not None and stop_event.is_set():
             raise PndTimeoutError("Operation cancelled by stop_event")
-        if deadline is not None and time.monotonic() > deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             raise PndTimeoutError("Operation deadline exceeded")
 
     def _check_html_errors(self, html_text: str) -> None:
@@ -181,6 +487,136 @@ class PndHttpClient:
         if "odstávka" in text_lower or "probíhá údržba" in text_lower or "under maintenance" in text_lower:
             raise PndMaintenanceError("ČEZ PND portal is under maintenance (ERR_MAINTENANCE)")
 
+    @staticmethod
+    def _response_header(response: requests.Response, name: str) -> str:
+        """Read one response header from real responses and small test doubles."""
+        headers = getattr(response, "headers", None)
+        if not isinstance(headers, Mapping):
+            return ""
+        for header_name, value in headers.items():
+            if isinstance(header_name, str) and header_name.lower() == name.lower():
+                if not isinstance(value, str):
+                    raise PndPortalError(f"Malformed response header: {name} (ERR_PORTAL)")
+                return value.strip()
+        return ""
+
+    def _read_bounded_response(
+        self,
+        response: requests.Response,
+        max_bytes: int,
+        stop_event: Optional[threading.Event] = None,
+        deadline: Optional[float] = None,
+    ) -> str:
+        """Stream and strictly decode one bounded, non-CSV response.
+
+        Callers request ``stream=True`` so headers are available before body
+        consumption. ``requests`` yields decompressed bytes from
+        ``iter_content``; counting those bytes limits expansion rather than
+        trusting a compressed Content-Length. This method owns the response
+        and closes it on every success and failure path.
+        """
+        response_status = getattr(response, "status_code", "unknown")
+        response_status = response_status if isinstance(response_status, int) else "unknown"
+        response_url = self._response_url(response, "")
+        response_method = getattr(response, "_pnd_request_method", "GET")
+        redirect_index = getattr(response, "_pnd_redirect_index", "unknown")
+        response_mime = "unknown"
+        total = 0
+        try:
+            response_mime = self._safe_mime_type(
+                self._response_header(response, "Content-Type")
+            )
+            if max_bytes <= 0:
+                raise PndPortalError("Invalid response size limit (ERR_PORTAL)")
+            content_length = self._response_header(response, "Content-Length")
+            if content_length:
+                if not re.fullmatch(r"[0-9]+", content_length):
+                    raise PndPortalError("Invalid response Content-Length (ERR_PORTAL)")
+                if len(content_length) > MAX_CONTENT_LENGTH_DIGITS:
+                    raise PndPortalError("Response exceeds size limit (ERR_PORTAL)")
+                normalized_length = content_length.lstrip("0") or "0"
+                limit_text = str(max_bytes)
+                if len(normalized_length) > len(limit_text) or (
+                    len(normalized_length) == len(limit_text)
+                    and normalized_length > limit_text
+                ):
+                    raise PndPortalError("Response exceeds size limit (ERR_PORTAL)")
+
+            content_type = self._response_header(response, "Content-Type")
+            encoding = getattr(response, "encoding", None)
+            if not isinstance(encoding, str) or not encoding.strip():
+                charset_match = re.search(
+                    r"(?i)(?:^|;)\s*charset\s*=\s*([^;\s]+)", content_type
+                )
+                encoding = charset_match.group(1).strip("\"'") if charset_match else "utf-8"
+            try:
+                decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+            except (LookupError, TypeError) as err:
+                raise PndPortalError("Unsupported response encoding (ERR_PORTAL)") from err
+
+            text_parts: list[str] = []
+            self._check_deadline_and_stop(stop_event, deadline)
+            for chunk in response.iter_content(
+                chunk_size=HTTP_STREAM_CHUNK_SIZE,
+                decode_unicode=False,
+            ):
+                self._check_deadline_and_stop(stop_event, deadline)
+                if not chunk:
+                    continue
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise PndPortalError("Malformed response body chunk (ERR_PORTAL)")
+                chunk_bytes = bytes(chunk)
+                total += len(chunk_bytes)
+                if total > max_bytes:
+                    raise PndPortalError("Response exceeds size limit (ERR_PORTAL)")
+                try:
+                    text_parts.append(decoder.decode(chunk_bytes, final=False))
+                except UnicodeError as err:
+                    raise PndPortalError("Malformed response encoding (ERR_PORTAL)") from err
+            try:
+                text_parts.append(decoder.decode(b"", final=True))
+            except UnicodeError as err:
+                raise PndPortalError("Malformed response encoding (ERR_PORTAL)") from err
+            self._check_deadline_and_stop(stop_event, deadline)
+            response_text = _BoundedResponseText(
+                "".join(text_parts),
+                {
+                    "status": response_status,
+                    "mime": response_mime,
+                    "decoded_bytes": total,
+                    "body_characters": sum(len(part) for part in text_parts),
+                },
+            )
+            self._debug_http_event("read", response_method, response_url,
+                                   response_status, redirect_index,
+                                   mime=response_mime, bytes=total)
+            return response_text
+        except requests.exceptions.Timeout as err:
+            self._debug_http_event(
+                "read_timeout", response_method, response_url, response_status,
+                redirect_index, mime=response_mime, bytes=total,
+                exception_type=type(err).__name__,
+            )
+            raise PndTimeoutError("HTTP response read timeout (ERR_TIMEOUT)") from err
+        except requests.exceptions.ConnectionError as err:
+            if "read timed out" in str(err).lower() or any(
+                type(item).__name__ == "ReadTimeoutError" for item in err.args
+            ):
+                self._debug_http_event(
+                    "read_timeout", response_method, response_url, response_status,
+                    redirect_index, mime=response_mime, bytes=total,
+                    exception_type=type(err).__name__,
+                )
+                raise PndTimeoutError("HTTP response read timeout (ERR_TIMEOUT)") from err
+            raise PndPortalError("HTTP response connection failed (ERR_PORTAL)") from err
+        except requests.exceptions.RequestException as err:
+            raise PndPortalError("HTTP response read failed (ERR_PORTAL)") from err
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
     def _safe_request(
         self,
         session: requests.Session,
@@ -192,14 +628,53 @@ class PndHttpClient:
     ) -> requests.Response:
         """Execute HTTP request with timeout, stop event check, and exception mapping."""
         self._check_deadline_and_stop(stop_event, deadline)
-        if "timeout" not in kwargs:
-            kwargs["timeout"] = DEFAULT_TIMEOUT
+        requested_timeout = kwargs.get("timeout", DEFAULT_TIMEOUT)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PndTimeoutError("Operation deadline exceeded")
+            if isinstance(requested_timeout, tuple):
+                connect_requested, read_requested = requested_timeout
+            else:
+                connect_requested = read_requested = requested_timeout
+            # A requests ``(connect, read)`` tuple applies both values
+            # independently, so capping each to ``remaining`` permits one
+            # request to consume almost twice the remaining operation budget.
+            # urllib3's total timeout accounts for elapsed connect time; the
+            # explicit split also bounds both phases when an adapter/test
+            # double only observes the phase values.
+            connect_limit = remaining * 0.4
+            read_limit = remaining - connect_limit
+            if kwargs.get("stream"):
+                read_limit = min(read_limit, STREAM_READ_TIMEOUT_SLICE)
+            connect_timeout = (
+                connect_limit
+                if connect_requested is None
+                else min(float(connect_requested), connect_limit)
+            )
+            read_timeout = (
+                read_limit
+                if read_requested is None
+                else min(float(read_requested), read_limit)
+            )
+            requested_timeout = Urllib3Timeout(
+                total=remaining,
+                connect=connect_timeout,
+                read=read_timeout,
+            )
+        kwargs["timeout"] = requested_timeout
 
         try:
             resp = session.request(method, url, **kwargs)
-            self._check_deadline_and_stop(stop_event, deadline)
+            try:
+                self._check_deadline_and_stop(stop_event, deadline)
+            except Exception:
+                resp.close()
+                raise
             return resp
         except requests.exceptions.Timeout as err:
+            self._debug_http_event("timeout", method, url,
+                                   exception_type=type(err).__name__)
             raise PndTimeoutError("HTTP request timeout (ERR_TIMEOUT)") from err
         except requests.exceptions.RequestException as err:
             raise PndPortalError(f"HTTP request error: {self._mask_sensitive(str(err))} (ERR_PORTAL)") from err
@@ -211,30 +686,40 @@ class PndHttpClient:
         deadline: Optional[float] = None,
     ) -> None:
         """Authenticate via ČEZ SSO (MEPAS / DIP CAS) OIDC flow using HTTP requests."""
-        _LOGGER.debug("Starting HTTP SSO authentication for user %s", self._mask_sensitive(self.username))
-
         # Step 1: Initial GET to PND dashboard landing (triggers OIDC redirects to CAS login)
-        resp = self._safe_request(session, "GET", URL_PND_LOGIN, stop_event, deadline)
-        self._verify_origin(resp.url, ORIGIN_STATE_PREAUTH)
-        self._check_html_errors(resp.text)
+        resp = self._request_with_safe_redirects(
+            session,
+            "GET",
+            URL_PND_LOGIN,
+            ORIGIN_STATE_PREAUTH,
+            stop_event,
+            deadline,
+            stream=True,
+        )
+        response_text = self._read_bounded_response(
+            resp,
+            MAX_AUTH_RESPONSE_SIZE,
+            stop_event,
+            deadline,
+        )
+        response_url = self._response_url(resp, URL_PND_LOGIN)
+        self._verify_origin(response_url, ORIGIN_STATE_PREAUTH)
+        self._check_html_errors(response_text)
 
         # Step 2: Parse CAS login form HTML
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(response_text, "html.parser")
         form = soup.find("form", id="fm1") or soup.find("form")
 
         if not form:
-            if "cezpnd2" in resp.url and ("dashboard" in resp.url or "view" in resp.url):
-                _LOGGER.debug("Already authenticated to PND portal")
+            if "cezpnd2" in response_url and (
+                "dashboard" in response_url or "view" in response_url
+            ):
                 return
             raise PndAuthError("Could not locate CAS authentication form (ERR_AUTH)")
 
-        action_url = form.get("action") or resp.url
-        action_url = urljoin(resp.url, action_url)
-
-        # Verify host of login action URL (must be credential entry IDP host)
+        action_url = urljoin(response_url, form.get("action") or response_url)
         self._verify_origin(action_url, ORIGIN_STATE_CREDENTIALS)
 
-        # Extract hidden form fields (execution, _eventId, lt, etc.)
         form_data: Dict[str, str] = {}
         for input_elem in form.find_all("input"):
             name = input_elem.get("name")
@@ -244,29 +729,39 @@ class PndHttpClient:
 
         form_data["username"] = self.username
         form_data["password"] = self.password
-        if "_eventId" not in form_data:
-            form_data["_eventId"] = "submit"
-        if "submit" not in form_data:
-            form_data["submit"] = "PŘIHLÁSIT SE"
-
-        # Step 3: POST credentials to CAS
+        form_data.setdefault("_eventId", "submit")
+        form_data.setdefault("submit", "PŘIHLÁSIT SE")
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
-            "Referer": resp.url,
+            "Referer": response_url,
         }
-        post_resp = self._safe_request(
-            session, "POST", action_url, stop_event, deadline, data=form_data, headers=headers
+
+        # Step 3: POST credentials to CAS
+        post_resp = self._request_with_safe_redirects(
+            session,
+            "POST",
+            action_url,
+            ORIGIN_STATE_PREAUTH,
+            stop_event,
+            deadline,
+            credential_request=True,
+            data=form_data,
+            headers=headers,
+            stream=True,
         )
 
-        # Check response for CAS authentication errors
-        self._check_html_errors(post_resp.text)
-
-        # Step 4: Verify post-login redirection to PND APP state
-        if "neplatné" in post_resp.text.lower() or "chybné" in post_resp.text.lower():
+        post_text = self._read_bounded_response(
+            post_resp,
+            MAX_AUTH_RESPONSE_SIZE,
+            stop_event,
+            deadline,
+        )
+        self._check_html_errors(post_text)
+        if "neplatné" in post_text.lower() or "chybné" in post_text.lower():
             raise PndAuthError("Invalid credentials provided to ČEZ SSO (ERR_AUTH)")
-
-        self._verify_origin(post_resp.url, ORIGIN_STATE_APP)
-        _LOGGER.debug("HTTP SSO authentication successful")
+        self._verify_origin(
+            self._response_url(post_resp, action_url), ORIGIN_STATE_APP
+        )
 
     def _fetch_dashboard_metadata(
         self,
@@ -276,17 +771,100 @@ class PndHttpClient:
     ) -> Dict[str, Any]:
         """Fetch dashboard configuration JSON (idDeviceSet, electrometers list, user metadata)."""
         try:
-            resp = self._safe_request(session, "GET", URL_DASHBOARD_DATA, stop_event, deadline)
-            if resp.status_code == 200 and "application/json" in resp.headers.get("Content-Type", ""):
+            resp = self._request_with_safe_redirects(
+                session,
+                "GET",
+                URL_DASHBOARD_DATA,
+                ORIGIN_STATE_APP,
+                stop_event,
+                deadline,
+                stream=True,
+            )
+            response_status = resp.status_code
+            response_url = self._response_url(resp, URL_DASHBOARD_DATA)
+            response_text = self._read_bounded_response(
+                resp,
+                MAX_DASHBOARD_RESPONSE_SIZE,
+                stop_event,
+                deadline,
+            )
+            read_metadata = dict(getattr(response_text, "pnd_metadata", {}))
+            content_type = str(read_metadata.get("mime", "unknown"))
+            if response_status == 200 and "application/json" in content_type:
                 try:
-                    data = resp.json()
-                    if isinstance(data, dict):
-                        return data
-                except ValueError:
-                    pass
-        except Exception as err:
-            _LOGGER.debug("Fetch dashboard metadata note: %s", err)
+                    data = json.loads(response_text)
+                except (TypeError, ValueError) as err:
+                    self._debug_http_event("dashboard_parse", "GET", response_url,
+                        response_status, mime=content_type,
+                        body_bytes=read_metadata.get("decoded_bytes"),
+                        body_characters=read_metadata.get("body_characters"), shape="other")
+                    raise PndParseError("Dashboard metadata is invalid (ERR_PORTAL)") from err
+                shape = "object" if isinstance(data, dict) else "list" if isinstance(data, list) else "other"
+                telemetry_fields: Dict[str, Any] = {
+                    "body_bytes": read_metadata.get("decoded_bytes"),
+                    "body_characters": read_metadata.get("body_characters"),
+                    "shape": shape,
+                }
+                if isinstance(data, list):
+                    telemetry_fields["item_count"] = len(data)
+                self._debug_http_event("dashboard_parse", "GET", response_url,
+                    response_status, mime=content_type, **telemetry_fields)
+                return _normalize_dashboard_payload(data)
+        except (PndAuthError, PndTimeoutError, PndPortalError, PndParseError):
+            raise
+        except Exception:
+            return {}
         return {}
+
+    @staticmethod
+    def _parse_meter_records(data: list[Any]) -> Tuple[List[str], List[str]]:
+        """Validate meter records and return normalized ELM and EAN values."""
+        def normalize_identifier(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                raise PndParseError("Meter response contains an invalid identifier (ERR_PORTAL)")
+            return str(value).strip()
+
+        elm_list: List[str] = []
+        ean_list: List[str] = []
+        for item in data:
+            if not isinstance(item, dict):
+                raise PndParseError("Meter response contains a non-object record (ERR_PORTAL)")
+            normalized_fields = {
+                field: normalize_identifier(item[field])
+                for field in (*METER_ELM_FIELDS, METER_EAN_FIELD)
+                if field in item
+            }
+            elm = next(
+                (normalized_fields[field] for field in METER_ELM_FIELDS if normalized_fields.get(field)),
+                "",
+            )
+            ean = normalized_fields.get(METER_EAN_FIELD, "")
+            if not elm and not ean:
+                raise PndParseError("Meter response record has no identifier (ERR_PORTAL)")
+            if elm:
+                elm_list.append(elm)
+            if ean:
+                ean_list.append(ean)
+        return elm_list, ean_list
+
+    @staticmethod
+    def _metadata_meter_records(metadata: Dict[str, Any]) -> Optional[List[Any]]:
+        """Validate the metadata container contract before selecting records."""
+        present_fields = [field for field in METER_METADATA_FIELDS if field in metadata]
+        if not present_fields:
+            return None
+        for field in present_fields:
+            if not isinstance(metadata[field], list):
+                raise PndParseError(
+                    f"Metadata field {field} must be a list (ERR_PORTAL)"
+                )
+        if len(present_fields) > 1:
+            raise PndParseError(
+                "Metadata contains conflicting meter list fields (ERR_PORTAL)"
+            )
+        return metadata[present_fields[0]]
 
     def _select_elm(
         self,
@@ -299,38 +877,77 @@ class PndHttpClient:
         available_elms: List[str] = []
         if not self.elm and not self.ean:
             return available_elms
+        configured_identifier = mask_elm(self.elm) if self.elm else mask_ean(self.ean)
 
-        # 1. Check metadata meters if provided
-        if metadata:
-            meters = metadata.get("meters") or metadata.get("devices") or metadata.get("electrometers")
-            if isinstance(meters, list) and len(meters) > 0:
-                elm_list = [str(m.get("elm") or m.get("electrometerId") or m.get("id", "")).strip() for m in meters if isinstance(m, dict)]
-                ean_list = [str(m.get("ean", "")).strip() for m in meters if isinstance(m, dict)]
-                available_elms = [e for e in elm_list if e]
-                if self.elm and self.elm not in elm_list and self.ean not in ean_list:
-                    raise PndElmNotFoundError(f"ELM meter {mask_elm(self.elm)} not found in account (ERR_ELM_NOT_FOUND)")
+        # 1. Check dashboard metadata if provided.  A present empty list is
+        # an explicit request to use the API fallback; malformed containers or
+        # conflicting supported fields never silently fall through.
+        if metadata is not None:
+            if not isinstance(metadata, dict):
+                raise PndParseError("Dashboard metadata must be an object (ERR_PORTAL)")
+            meters = self._metadata_meter_records(metadata)
+            if meters:
+                elm_list, ean_list = self._parse_meter_records(meters)
+                available_elms = elm_list
+                if not (
+                    (self.elm and self.elm in elm_list)
+                    or (self.ean and self.ean in ean_list)
+                ):
+                    raise PndElmNotFoundError(f"Configured meter {configured_identifier} not found in account (ERR_ELM_NOT_FOUND)")
                 return available_elms
 
         # 2. Check meters API endpoint fallback
         meters_url = "https://pnd.cezdistribuce.cz/cezpnd2/api/v1/consumption/meters"
         try:
-            resp = self._safe_request(session, "GET", meters_url, stop_event, deadline)
-            if resp.status_code == 200 and "application/json" in resp.headers.get("Content-Type", ""):
+            resp = self._request_with_safe_redirects(
+                session,
+                "GET",
+                meters_url,
+                ORIGIN_STATE_APP,
+                stop_event,
+                deadline,
+                stream=True,
+            )
+            response_status = resp.status_code
+            response_url = self._response_url(resp, meters_url)
+            response_text = self._read_bounded_response(
+                resp,
+                MAX_METERS_RESPONSE_SIZE,
+                stop_event,
+                deadline,
+            )
+            read_metadata = dict(getattr(response_text, "pnd_metadata", {}))
+            content_type = str(read_metadata.get("mime", "unknown"))
+            if response_status == 200 and "application/json" in content_type:
                 try:
-                    data = resp.json()
-                    if isinstance(data, list) and len(data) > 0:
-                        elm_list = [str(item.get("elm", "")).strip() for item in data if isinstance(item, dict)]
-                        ean_list = [str(item.get("ean", "")).strip() for item in data if isinstance(item, dict)]
-                        available_elms = [e for e in elm_list if e]
-                        if self.elm and self.elm not in elm_list and self.ean not in ean_list:
-                            raise PndElmNotFoundError(f"ELM meter {mask_elm(self.elm)} not found in account (ERR_ELM_NOT_FOUND)")
-                        return available_elms
-                except ValueError:
-                    pass
+                    data = json.loads(response_text)
+                except (TypeError, ValueError) as err:
+                    self._debug_http_event("meters_parse", "GET", response_url,
+                        response_status, mime=content_type,
+                        body_bytes=read_metadata.get("decoded_bytes"),
+                        body_characters=read_metadata.get("body_characters"), shape="other")
+                    raise PndParseError("Meter response is invalid (ERR_PORTAL)") from err
+                shape = "object" if isinstance(data, dict) else "list" if isinstance(data, list) else "other"
+                self._debug_http_event("meters_parse", "GET", response_url,
+                    response_status, mime=content_type,
+                    body_bytes=read_metadata.get("decoded_bytes"),
+                    body_characters=read_metadata.get("body_characters"), shape=shape)
+                if isinstance(data, list) and len(data) > 0:
+                    elm_list, ean_list = self._parse_meter_records(data)
+                    available_elms = elm_list
+                    if not (
+                        (self.elm and self.elm in elm_list)
+                        or (self.ean and self.ean in ean_list)
+                    ):
+                        raise PndElmNotFoundError(f"Configured meter {configured_identifier} not found in account (ERR_ELM_NOT_FOUND)")
+                    return available_elms
+                raise PndParseError("Meter response has an invalid shape (ERR_PORTAL)")
         except PndElmNotFoundError:
             raise
-        except Exception as err:
-            _LOGGER.debug("ELM verification endpoint check note: %s", err)
+        except (PndAuthError, PndTimeoutError, PndPortalError, PndParseError):
+            raise
+        except Exception:
+            return available_elms
 
         return available_elms
 
@@ -363,8 +980,10 @@ class PndHttpClient:
         stop_event: Optional[threading.Event] = None,
         deadline: Optional[float] = None,
     ) -> str:
-        """Download CSV report from PND export endpoint and save to download_dir."""
-        os.makedirs(download_dir, exist_ok=True)
+        """Download and atomically store a bounded, validated CSV response."""
+        if os.path.basename(filename) != filename:
+            raise PndPortalError("Invalid report filename (ERR_PORTAL)")
+        os.makedirs(download_dir, mode=0o700, exist_ok=True)
         target_path = os.path.join(download_dir, filename)
 
         params: Dict[str, Any] = {
@@ -384,22 +1003,156 @@ class PndHttpClient:
             "Referer": URL_PND_LOGIN,
         }
 
+        directory_fd: Optional[int] = None
+        directory_identity: Optional[Tuple[int, int]] = None
+        temp_name: Optional[str] = None
+        resp: Optional[requests.Response] = None
+        total = 0
+        report_kind = {
+            "range-consumption.csv": "range_consumption",
+            "range-production.csv": "range_production",
+            "daily-consumption.csv": "daily_consumption",
+            "daily-production.csv": "daily_production",
+        }.get(filename, "unknown")
         try:
-            resp = self._safe_request(session, "GET", URL_EXPORT, stop_event, deadline, params=params, headers=headers)
-            if resp.status_code == 200 and resp.content:
-                with open(target_path, "wb") as f:
-                    f.write(resp.content)
-                return target_path
-            else:
-                _LOGGER.warning("Report %s download returned status %s", filename, resp.status_code)
-        except Exception as err:
-            _LOGGER.info("Report %s fetch note: %s", filename, err)
+            directory_fd, directory_identity = self._open_download_directory(download_dir)
+            resp = self._request_with_safe_redirects(
+                session,
+                "GET",
+                URL_EXPORT,
+                ORIGIN_STATE_APP,
+                stop_event,
+                deadline,
+                params=params,
+                headers=headers,
+                stream=True,
+            )
+            if resp.status_code in OPTIONAL_REPORT_HTTP_STATUSES:
+                raise PndReportUnavailableError(
+                    f"Report is unavailable (HTTP {resp.status_code}) (ERR_PORTAL)"
+                )
+            if resp.status_code != 200:
+                raise PndPortalError(
+                    f"Report download returned HTTP {resp.status_code} (ERR_PORTAL)"
+                )
 
-        # Create placeholder empty file if report fetch failed/optional
-        if not os.path.exists(target_path):
-            with open(target_path, "w", encoding="utf-8") as f:
-                f.write("")
-        return target_path
+            content_type = self._safe_mime_type(
+                self._response_header(resp, "Content-Type")
+            )
+            declared_length = self._response_header(resp, "Content-Length")
+            declared_bytes: Union[int, str] = "unknown"
+            if declared_length and re.fullmatch(r"[0-9]+", declared_length):
+                try:
+                    declared_bytes = int(declared_length)
+                except ValueError:
+                    declared_bytes = "unknown"
+            self._debug_http_event("csv_response", "GET", URL_EXPORT, resp.status_code,
+                getattr(resp, "_pnd_redirect_index", "unknown"), mime=content_type,
+                report_kind=report_kind, declared_bytes=declared_bytes, bytes=0)
+            if content_type != "unknown" and content_type not in CSV_CONTENT_TYPES:
+                raise PndPortalError("Report response is not CSV (ERR_PORTAL)")
+            content_length = declared_length
+            if content_length:
+                try:
+                    if int(content_length) > MAX_CSV_RESPONSE_SIZE:
+                        raise PndPortalError("Report response exceeds size limit (ERR_PORTAL)")
+                except ValueError as err:
+                    raise PndPortalError("Invalid report Content-Length (ERR_PORTAL)") from err
+
+            temp_name = f".{filename}.{secrets.token_hex(12)}.part"
+            fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            try:
+                os.fchmod(fd, 0o600)
+                report_file = os.fdopen(fd, "wb")
+            except Exception:
+                os.close(fd)
+                raise
+            prefix = bytearray()
+            with report_file:
+                for chunk in resp.iter_content(chunk_size=CSV_STREAM_CHUNK_SIZE):
+                    self._check_deadline_and_stop(stop_event, deadline)
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > MAX_CSV_RESPONSE_SIZE:
+                        raise PndPortalError("Report response exceeds size limit (ERR_PORTAL)")
+                    if len(prefix) < 4096:
+                        prefix.extend(chunk[: 4096 - len(prefix)])
+                    report_file.write(chunk)
+                report_file.flush()
+                os.fsync(report_file.fileno())
+
+            self._debug_http_event("csv_read", "GET", URL_EXPORT, resp.status_code,
+                getattr(resp, "_pnd_redirect_index", "unknown"), mime=content_type,
+                report_kind=report_kind, declared_bytes=declared_bytes, bytes=total)
+
+            if total == 0:
+                raise PndPortalError("Report response is empty (ERR_PORTAL)")
+            signature = bytes(prefix).lstrip(b"\xef\xbb\xbf\x00\t\r\n ").lower()
+            if signature.startswith((b"<!doctype html", b"<html", b"<?xml")):
+                raise PndPortalError("Report response contains markup, not CSV (ERR_PORTAL)")
+            first_line = signature.splitlines()[0] if signature else b""
+            if b";" not in first_line and b"," not in first_line:
+                raise PndPortalError("Report response lacks a CSV delimiter (ERR_PORTAL)")
+
+            if self._validate_download_directory(download_dir) != directory_identity:
+                raise PndPortalError("Report directory changed during download (ERR_PORTAL)")
+            os.replace(
+                temp_name,
+                filename,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            temp_name = None
+            if self._validate_download_directory(download_dir) != directory_identity:
+                os.unlink(filename, dir_fd=directory_fd)
+                raise PndPortalError("Report directory changed during publication (ERR_PORTAL)")
+            return target_path
+        except requests.exceptions.Timeout as err:
+            self._debug_http_event(
+                "csv_timeout", "GET", URL_EXPORT,
+                getattr(resp, "status_code", "unknown"),
+                getattr(resp, "_pnd_redirect_index", "unknown"),
+                report_kind=report_kind, bytes=total,
+                exception_type=type(err).__name__,
+            )
+            raise PndTimeoutError("HTTP response read timeout (ERR_TIMEOUT)") from err
+        except requests.exceptions.ConnectionError as err:
+            # requests wraps urllib3 ReadTimeoutError in ConnectionError while
+            # iterating a streamed response instead of raising Timeout.
+            if "read timed out" in str(err).lower() or any(
+                type(item).__name__ == "ReadTimeoutError" for item in err.args
+            ):
+                self._debug_http_event(
+                    "csv_timeout", "GET", URL_EXPORT,
+                    getattr(resp, "status_code", "unknown"),
+                    getattr(resp, "_pnd_redirect_index", "unknown"),
+                    report_kind=report_kind, bytes=total,
+                    exception_type=type(err).__name__,
+                )
+                raise PndTimeoutError("HTTP response read timeout (ERR_TIMEOUT)") from err
+            raise PndPortalError("Report download connection failed (ERR_PORTAL)") from err
+        except (PndAuthError, PndPortalError, PndTimeoutError):
+            raise
+        except Exception as err:
+            raise PndPortalError(
+                f"Report download failed: {type(err).__name__} (ERR_PORTAL)"
+            ) from err
+        finally:
+            if resp is not None:
+                resp.close()
+            if temp_name is not None and directory_fd is not None:
+                try:
+                    os.unlink(temp_name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+            if directory_fd is not None:
+                os.close(directory_fd)
 
     def test_login(
         self,
@@ -447,11 +1200,14 @@ class PndHttpClient:
             )
 
             # 2. Download 15-min interval range production (-A) - idAssembly -1002
-            range_prod = self._fetch_csv_report(
-                session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
-                id_device_set=id_device_set, date_from=yesterday, date_to=today,
-                stop_event=stop_event, deadline=deadline
-            )
+            try:
+                range_prod = self._fetch_csv_report(
+                    session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
+                    id_device_set=id_device_set, date_from=yesterday, date_to=today,
+                    stop_event=stop_event, deadline=deadline
+                )
+            except PndReportUnavailableError:
+                range_prod = ""
 
             # 3. Download Daily Consumption (+A) - idAssembly -1021
             daily_cons = self._fetch_csv_report(
@@ -461,11 +1217,14 @@ class PndHttpClient:
             )
 
             # 4. Download Daily Production (-A) - idAssembly -1022
-            daily_prod = self._fetch_csv_report(
-                session, download_dir, "daily-production.csv", ASSEMBLY_DAILY_PRODUCTION,
-                id_device_set=id_device_set, date_from=yesterday, date_to=yesterday,
-                stop_event=stop_event, deadline=deadline
-            )
+            try:
+                daily_prod = self._fetch_csv_report(
+                    session, download_dir, "daily-production.csv", ASSEMBLY_DAILY_PRODUCTION,
+                    id_device_set=id_device_set, date_from=yesterday, date_to=yesterday,
+                    stop_event=stop_event, deadline=deadline
+                )
+            except PndReportUnavailableError:
+                daily_prod = ""
 
             # Validate mandatory consumption report
             if not os.path.exists(range_cons):
@@ -543,4 +1302,3 @@ class PndHttpClient:
             session.close()
 
     download_historical_data = download_custom_range
-

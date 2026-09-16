@@ -1,0 +1,4 @@
+title = "HACS CEZ PND Gitleaks policy"
+
+[extend]
+useDefault = true

@@ -200,7 +200,7 @@ async def _test_credentials(
                     hass_cfg,
                 )
 
-            ownership.set_future(worker_future)
+            worker_future = ownership.set_future(worker_future)
             if inspect.isawaitable(worker_future) or isinstance(worker_future, (asyncio.Future, asyncio.Task)):
                 await asyncio.shield(worker_future)
             elif hasattr(worker_future, "result"):

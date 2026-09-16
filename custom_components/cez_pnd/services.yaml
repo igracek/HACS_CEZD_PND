@@ -1,6 +1,6 @@
 fetch_data:
   name: Stáhnout data z PND
-  description: Spustí okamžité stažení dat z Portálu Naměřených Dat ČEZ Distribuce.
+  description: Spustí okamžité stažení dat z Portálu Naměřených Dat ČEZ Distribuce. Tuto službu mohou volat pouze administrátoři Home Assistantu.
   fields:
     ean:
       name: EAN kód
