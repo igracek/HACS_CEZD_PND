@@ -193,21 +193,3 @@ Integrace klade maximální důraz na bezpečnost a integritu dat:
 
 Tento projekt je licencován pod licencí MIT - viz soubor [LICENSE](LICENSE) pro podrobnosti.
 
----
-
-## Bezpečné publikování repozitáře
-
-Interní skript `scripts/export_to_github.sh` vytváří veřejný repozitář pouze z explicitně povolených souborů uložených v aktuálním commitu `HEAD`. Nesledované a ignorované soubory se nečtou ani nekopírují. Pokud se ve veřejném stromu objeví nový sledovaný soubor, povolený soubor je symlink nebo sledované soubory obsahují necommitnuté či staged změny, export skončí chybou. Nový veřejný soubor je proto nutné nejdříve vědomě doplnit do `PUBLIC_FILES` a commitnout.
-
-Před spuštěním musí být v `PATH` dostupný nástroj Gitleaks. Skript fail-closed kontroluje celou historii zdrojového repozitáře, přesně sestavený veřejný strom, staged cílový strom a nakonec celou cílovou historii. Staged seznam z `git ls-files -z` navíc musí přesně odpovídat cílové části allowlistu. Teprve po úspěchu všech kontrol provede push do Gitea. Chybějící nástroj, nález nebo interní chyba scanneru push zablokuje. Výstup scanneru se nezobrazuje, protože by mohl obsahovat nalezené citlivé hodnoty; potlačen je také surový výstup push operace, který by mohl obsahovat credentials vložené do vzdálené URL.
-
-Příklad lokálního spuštění:
-
-```bash
-GITEA_REMOTE_URL='git@gitea.example:team/HACS_CEZD_PND_public.git' \
-  ./scripts/export_to_github.sh /bezpecna/cesta/HACS_CEZD_PND_public igracek HACS_CEZD_PND
-```
-
-Cílová cesta nesmí být zdrojový repozitář, jeho podadresář, jeho nadřazený adresář ani symlink. Existující cílový repozitář musí být čistý a mimo `.git` smí obsahovat pouze sledované běžné soubory a jejich nutné rodičovské adresáře. Nesledované či ignorované soubory, symlinky, prázdné kolizní adresáře, FIFO, sockety a zařízení se odmítají a nikdy automaticky nemažou.
-
-Úprava existujícího cíle je transakční: sestavení, stage, commit i bezpečnostní kontroly proběhnou v dočasném klonu. Existující pracovní strom se aktualizuje až po úspěšném dokončení všech kontrol a pushi, takže chyba scanneru jej nenechá změněný ani staged. Commit hooky jsou pro automatický release commit vypnuté přes lokální `core.hooksPath=/dev/null`. GitHub remote `origin` zůstává připravený pro následný ruční push, zatímco automatický push míří na remote `gitea` stejně jako dříve.
