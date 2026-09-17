@@ -71,10 +71,11 @@ METER_ELM_FIELDS: Final = ("elm", "electrometerId", "id")
 METER_EAN_FIELD: Final = "ean"
 METER_METADATA_FIELDS: Final = ("meters", "devices", "electrometers")
 # ``requests`` does not enforce urllib3's ``total`` timeout while a streamed
-# body is consumed.  Keep each blocking socket read short so the cooperative
-# deadline check between chunks can overrun the operation budget by at most a
-# small, deterministic interval.
-STREAM_READ_TIMEOUT_SLICE: Final = 0.5
+# body is consumed.  Keep each blocking socket read bounded so the cooperative
+# deadline check between chunks cannot stall indefinitely.  Half a second was
+# too short for normal PND redirects and report generation in production; five
+# seconds stays inside the coordinator's 175 s / 180 s deadline margin.
+STREAM_READ_TIMEOUT_SLICE: Final = 5.0
 REDIRECT_STATUSES: Final = frozenset({301, 302, 303, 307, 308})
 CSV_CONTENT_TYPES: Final = frozenset(
     {
@@ -287,6 +288,28 @@ class PndHttpClient:
                 safe_fields[name] = value if isinstance(value, int) and value >= 0 else "unknown"
         details = " ".join(f"{key}={value}" for key, value in safe_fields.items())
         _LOGGER.warning("HTTP debug %s", details)
+
+    def _debug_operation_phase(self, phase: str) -> None:
+        """Log an allowlisted high-level phase without identifiers or payloads."""
+        allowed_phases = {
+            "yesterday_login",
+            "yesterday_metadata",
+            "yesterday_meter",
+            "yesterday_range_consumption",
+            "yesterday_range_production",
+            "yesterday_daily_consumption",
+            "yesterday_daily_production",
+            "custom_login",
+            "custom_metadata",
+            "custom_meter",
+            "custom_range_consumption",
+            "custom_range_production",
+            "complete",
+        }
+        if not bool(self.debug_mode):
+            return
+        safe_phase = phase if phase in allowed_phases else "unknown"
+        _LOGGER.warning("HTTP debug stage=operation_phase phase=%s", safe_phase)
 
     def _mask_sensitive(self, text: str) -> str:
         """Mask sensitive data in strings for logging and debugging."""
@@ -1184,8 +1207,11 @@ class PndHttpClient:
         session.headers.update({"User-Agent": DEFAULT_USER_AGENT})
 
         try:
+            self._debug_operation_phase("yesterday_login")
             self._login(session, stop_event, deadline)
+            self._debug_operation_phase("yesterday_metadata")
             metadata = self._fetch_dashboard_metadata(session, stop_event, deadline)
+            self._debug_operation_phase("yesterday_meter")
             self._select_elm(session, metadata, stop_event, deadline)
 
             id_device_set = str(metadata.get("idDeviceSet", "")) if metadata.get("idDeviceSet") else None
@@ -1193,6 +1219,7 @@ class PndHttpClient:
             today = datetime.now().strftime("%d.%m.%Y")
 
             # 1. Download 15-min interval range consumption (+A) - idAssembly -1001
+            self._debug_operation_phase("yesterday_range_consumption")
             range_cons = self._fetch_csv_report(
                 session, download_dir, "range-consumption.csv", ASSEMBLY_RANGE_CONSUMPTION,
                 id_device_set=id_device_set, date_from=yesterday, date_to=today,
@@ -1201,6 +1228,7 @@ class PndHttpClient:
 
             # 2. Download 15-min interval range production (-A) - idAssembly -1002
             try:
+                self._debug_operation_phase("yesterday_range_production")
                 range_prod = self._fetch_csv_report(
                     session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
                     id_device_set=id_device_set, date_from=yesterday, date_to=today,
@@ -1210,6 +1238,7 @@ class PndHttpClient:
                 range_prod = ""
 
             # 3. Download Daily Consumption (+A) - idAssembly -1021
+            self._debug_operation_phase("yesterday_daily_consumption")
             daily_cons = self._fetch_csv_report(
                 session, download_dir, "daily-consumption.csv", ASSEMBLY_DAILY_CONSUMPTION,
                 id_device_set=id_device_set, date_from=yesterday, date_to=yesterday,
@@ -1218,6 +1247,7 @@ class PndHttpClient:
 
             # 4. Download Daily Production (-A) - idAssembly -1022
             try:
+                self._debug_operation_phase("yesterday_daily_production")
                 daily_prod = self._fetch_csv_report(
                     session, download_dir, "daily-production.csv", ASSEMBLY_DAILY_PRODUCTION,
                     id_device_set=id_device_set, date_from=yesterday, date_to=yesterday,
@@ -1230,6 +1260,7 @@ class PndHttpClient:
             if not os.path.exists(range_cons):
                 raise PndPortalError("Mandatory report download failed: range-consumption.csv (ERR_PORTAL)")
 
+            self._debug_operation_phase("complete")
             return {
                 "daily_consumption": daily_cons,
                 "daily_production": daily_prod,
@@ -1255,8 +1286,11 @@ class PndHttpClient:
         session.headers.update({"User-Agent": DEFAULT_USER_AGENT})
 
         try:
+            self._debug_operation_phase("custom_login")
             self._login(session, stop_event, deadline)
+            self._debug_operation_phase("custom_metadata")
             metadata = self._fetch_dashboard_metadata(session, stop_event, deadline)
+            self._debug_operation_phase("custom_meter")
             self._select_elm(session, metadata, stop_event, deadline)
 
             id_device_set = str(metadata.get("idDeviceSet", "")) if metadata.get("idDeviceSet") else None
@@ -1276,12 +1310,14 @@ class PndHttpClient:
                 if parsed_dt:
                     date_to = (parsed_dt + timedelta(days=1)).strftime("%d.%m.%Y")
 
+            self._debug_operation_phase("custom_range_consumption")
             range_cons = self._fetch_csv_report(
                 session, download_dir, "range-consumption.csv", ASSEMBLY_RANGE_CONSUMPTION,
                 id_device_set=id_device_set, date_from=date_from, date_to=date_to,
                 stop_event=stop_event, deadline=deadline
             )
 
+            self._debug_operation_phase("custom_range_production")
             range_prod = self._fetch_csv_report(
                 session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
                 id_device_set=id_device_set, date_from=date_from, date_to=date_to,
@@ -1291,6 +1327,7 @@ class PndHttpClient:
             if not os.path.exists(range_cons):
                 raise PndPortalError("Mandatory range consumption report download failed (ERR_PORTAL)")
 
+            self._debug_operation_phase("complete")
             return {
                 "range_consumption": range_cons,
                 "range_production": range_prod,

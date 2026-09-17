@@ -192,4 +192,3 @@ Integrace klade maximální důraz na bezpečnost a integritu dat:
 ## 📄 Licence
 
 Tento projekt je licencován pod licencí MIT - viz soubor [LICENSE](LICENSE) pro podrobnosti.
-
