@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "lock_sha256": "e6c0da54a0a461e36676d6b13e12b388400210778cb5747b997ec7eae2a30818",
-    "manifest_sha256": "96efa935387c33fe9caefed6866e5d751f1c04781380bd62f62697bd9f50d436",
-    "sbom_sha256": "661e7dc9fde591b96f09a6f9949d30b5b1136abca74c46be26404ee62e175ecc"
+    "manifest_sha256": "462b4f44ee665020ef401197a6cdd6aaa631b485471b8aeb2de5982d0ae8a3fd",
+    "sbom_sha256": "40c030e0d903fd0dcf5afdb41d7eb871cd85407f480627f48a94683294cf4691"
   },
   "baseline": {
     "home_assistant": "2026.8.3",
@@ -10,7 +10,7 @@
     "python": "3.14",
     "resolved_at": "2026-09-15"
   },
-  "checked_at": "2026-09-19T07:35:17Z",
+  "checked_at": "2026-09-19T11:54:46Z",
   "database": "OSV.dev",
   "database_endpoint": "https://api.osv.dev/v1/querybatch",
   "future_safety_guarantee": false,

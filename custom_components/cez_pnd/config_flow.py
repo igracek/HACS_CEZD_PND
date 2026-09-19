@@ -106,6 +106,18 @@ def validate_scan_time(scan_time: str) -> bool:
     return bool(re.match(r"^([01]\d|2[0-3]):[0-5]\d$", str(scan_time).strip()))
 
 
+def _entry_client_config(
+    entry: config_entries.ConfigEntry,
+    overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build validation config with options taking precedence over entry data."""
+    config = dict(getattr(entry, "data", {}) or {})
+    config.update(dict(getattr(entry, "options", {}) or {}))
+    if overrides:
+        config.update(overrides)
+    return config
+
+
 async def _test_credentials(
     hass_or_user_input: Any,
     user_input: Optional[Dict[str, Any]] = None,
@@ -118,7 +130,7 @@ async def _test_credentials(
         hass = hass_or_user_input
         input_data = user_input or {}
 
-    client_mode = input_data.get(CONF_CLIENT_MODE, CLIENT_MODE_BROWSER)
+    client_mode = input_data.get(CONF_CLIENT_MODE, DEFAULT_CLIENT_MODE)
 
     if client_mode == CLIENT_MODE_HTTP:
         stop_event = threading.Event()
@@ -354,8 +366,10 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None and entry is not None:
             new_password = str(user_input.get(CONF_PASSWORD, "")).strip()
-            test_config = dict(entry.data)
-            test_config[CONF_PASSWORD] = new_password
+            test_config = _entry_client_config(
+                entry,
+                {CONF_PASSWORD: new_password},
+            )
 
             if not credentials_within_length_limit(user_input):
                 errors["base"] = "credentials_too_long"
@@ -426,8 +440,12 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_scan_time"
             else:
                 updated_data = {**entry.data, **user_input, CONF_EAN: existing_ean}
+                test_config = _entry_client_config(
+                    entry,
+                    {**user_input, CONF_EAN: existing_ean},
+                )
                 try:
-                    await _test_credentials(self.hass, updated_data)
+                    await _test_credentials(self.hass, test_config)
                 except PndAuthError:
                     errors["base"] = "invalid_auth"
                 except PndCaptchaError:
@@ -527,8 +545,10 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
                 # If user entered a new password, verify and update ConfigEntry.data
                 if new_password and str(new_password).strip():
                     new_pwd_clean = str(new_password).strip()
-                    test_config = dict(getattr(entry, "data", {}))
-                    test_config[CONF_PASSWORD] = new_pwd_clean
+                    test_config = _entry_client_config(
+                        entry,
+                        {**user_input, CONF_PASSWORD: new_pwd_clean},
+                    )
 
                     try:
                         await _test_credentials(self.hass, test_config)
