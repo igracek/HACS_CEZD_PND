@@ -47,6 +47,7 @@
       "account_locked": "CEZ PND account is locked.",
       "timeout": "Connection to CEZ PND portal timed out.",
       "elm_not_found": "Specified ELM number was not found in account.",
+      "elm_unavailable": "The PND account does not provide an ELM identifier in a supported field.",
       "service_unavailable": "CEZ PND portal is under maintenance.",
       "unknown": "Unexpected error occurred."
     },
@@ -80,6 +81,7 @@
       "account_locked": "CEZ PND account is locked.",
       "timeout": "Connection to CEZ PND portal timed out.",
       "elm_not_found": "Specified ELM number was not found in account.",
+      "elm_unavailable": "The PND account does not provide an ELM identifier in a supported field.",
       "service_unavailable": "CEZ PND portal is under maintenance.",
       "cannot_connect": "Failed to connect to CEZ PND portal."
     }

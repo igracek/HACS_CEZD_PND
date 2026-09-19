@@ -25,6 +25,7 @@ from .client import (
     PndAuthError,
     PndCaptchaError,
     PndElmNotFoundError,
+    PndElmUnavailableError,
     PndMaintenanceError,
     PndScraperClient,
     PndTimeoutError,
@@ -314,6 +315,8 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "timeout"
                 except PndElmNotFoundError:
                     errors["base"] = "elm_not_found"
+                except PndElmUnavailableError:
+                    errors["base"] = "elm_unavailable"
                 except PndMaintenanceError:
                     errors["base"] = "service_unavailable"
                 except Exception as err:
@@ -386,6 +389,8 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "timeout"
                 except PndElmNotFoundError:
                     errors["base"] = "elm_not_found"
+                except PndElmUnavailableError:
+                    errors["base"] = "elm_unavailable"
                 except PndMaintenanceError:
                     errors["base"] = "service_unavailable"
                 except Exception as err:
@@ -464,6 +469,8 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "timeout"
                 except PndElmNotFoundError:
                     errors["base"] = "elm_not_found"
+                except PndElmUnavailableError:
+                    errors["base"] = "elm_unavailable"
                 except PndMaintenanceError:
                     errors["base"] = "service_unavailable"
                 except Exception as err:
@@ -570,6 +577,8 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
                         errors["base"] = "timeout"
                     except PndElmNotFoundError:
                         errors["base"] = "elm_not_found"
+                    except PndElmUnavailableError:
+                        errors["base"] = "elm_unavailable"
                     except PndMaintenanceError:
                         errors["base"] = "service_unavailable"
                     except Exception as err:

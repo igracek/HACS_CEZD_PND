@@ -8,10 +8,10 @@
     "timestamp": "2026-09-15T00:00:00Z",
     "component": {
       "type": "application",
-      "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.3",
+      "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
       "name": "HACS_CEZD_PND",
-      "version": "1.0.3",
-      "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.3",
+      "version": "1.0.4",
+      "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
       "licenses": [{"license": {"id": "MIT"}}]
     },
     "tools": {"components": [{"type": "application", "name": "verify_release_dependencies.py", "version": "1"}]},
@@ -45,7 +45,7 @@
     {"type":"library","bom-ref":"pkg:pypi/wsproto@1.3.2","name":"wsproto","version":"1.3.2","purl":"pkg:pypi/wsproto@1.3.2","hashes":[{"alg":"SHA-256","content":"61eea322cdf56e8cc904bd3ad7573359a242ba65688716b0710a5eb12beab584"}],"externalReferences":[{"type":"distribution","url":"https://files.pythonhosted.org/packages/a4/f5/10b68b7b1544245097b2a1b8238f66f2fc6dcaeb24ba5d917f52bd2eed4f/wsproto-1.3.2-py3-none-any.whl"}],"properties":[{"name":"cez_pnd:dependency_role","value":"integration_transitive"}]}
   ],
   "dependencies": [
-    {"ref":"pkg:github/igracek/HACS_CEZD_PND@1.0.3","dependsOn":["pkg:pypi/beautifulsoup4@4.15.0","pkg:pypi/requests@2.34.2","pkg:pypi/selenium@4.49.0"]},
+    {"ref":"pkg:github/igracek/HACS_CEZD_PND@1.0.4","dependsOn":["pkg:pypi/beautifulsoup4@4.15.0","pkg:pypi/requests@2.34.2","pkg:pypi/selenium@4.49.0"]},
     {"ref":"pkg:pypi/attrs@26.1.0","dependsOn":[]},
     {"ref":"pkg:pypi/beautifulsoup4@4.15.0","dependsOn":["pkg:pypi/soupsieve@2.9.2","pkg:pypi/typing-extensions@4.16.0"]},
     {"ref":"pkg:pypi/certifi@2026.7.22","dependsOn":[]},

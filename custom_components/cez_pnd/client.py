@@ -91,6 +91,10 @@ class PndElmNotFoundError(PndError):
     """ELM meter identifier not found in account."""
 
 
+class PndElmUnavailableError(PndError):
+    """PND account metadata does not provide a usable ELM identifier."""
+
+
 class PndMaintenanceError(PndError):
     """CEZ PND portal is under maintenance."""
 

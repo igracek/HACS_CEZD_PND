@@ -47,10 +47,10 @@ EXPECTED_INTEGRATION_ROOTS = {"beautifulsoup4": "4.15.0", "selenium": "4.49.0"}
 EXPECTED_HA_ROOTS = {"requests": "2.34.2"}
 EXPECTED_APPLICATION = {
     "type": "application",
-    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.3",
+    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
     "name": "HACS_CEZD_PND",
-    "version": "1.0.3",
-    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.3",
+    "version": "1.0.4",
+    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
 }
 EXPECTED_CLOSURE = {
     "attrs": "26.1.0",

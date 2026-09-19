@@ -47,6 +47,7 @@
       "account_locked": "Účet ČEZ PND je zablokován.",
       "timeout": "Vypršel časový limit pro komunikaci s portálem ČEZ PND.",
       "elm_not_found": "Zadané číslo ELM nebylo nalezeno v nabídce portálu.",
+      "elm_unavailable": "Účet PND neposkytuje identifikátor ELM v podporovaném poli.",
       "service_unavailable": "Portál ČEZ PND prochází údržbou / odstávkou.",
       "unknown": "Došlo k neočekávané chybě."
     },
@@ -80,6 +81,7 @@
       "account_locked": "Účet ČEZ PND je zablokován.",
       "timeout": "Vypršel časový limit pro komunikaci s portálem ČEZ PND.",
       "elm_not_found": "Zadané číslo ELM nebylo nalezeno v nabídce portálu.",
+      "elm_unavailable": "Účet PND neposkytuje identifikátor ELM v podporovaném poli.",
       "service_unavailable": "Portál ČEZ PND prochází údržbou / odstávkou.",
       "cannot_connect": "Nepodařilo se navázat spojení s portálem ČEZ PND."
     }

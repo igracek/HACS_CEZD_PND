@@ -22,6 +22,7 @@ from .client import (
     PndAuthError,
     PndCaptchaError,
     PndElmNotFoundError,
+    PndElmUnavailableError,
     PndInsecureBrowserError,
     PndMaintenanceError,
     PndParseError,
@@ -68,6 +69,17 @@ MAX_CONTENT_LENGTH_DIGITS: Final = 20
 METER_ELM_FIELDS: Final = ("elm", "electrometerId", "id")
 METER_EAN_FIELD: Final = "ean"
 METER_METADATA_FIELDS: Final = ("meters", "devices", "electrometers")
+DASHBOARD_ELM_FIELDS: Final = ("electrometerId", "elm")
+ELM_CONTRACT_CANONICAL: Final = "canonical"
+ELM_CONTRACT_ALIAS_ELM: Final = "alias_elm"
+ELM_CONTRACT_MIXED: Final = "mixed"
+ELM_CONTRACT_ABSENT: Final = "absent"
+ELM_CONTRACT_VALUES: Final = frozenset({
+    ELM_CONTRACT_CANONICAL,
+    ELM_CONTRACT_ALIAS_ELM,
+    ELM_CONTRACT_MIXED,
+    ELM_CONTRACT_ABSENT,
+})
 # ``requests`` does not enforce urllib3's ``total`` timeout while a streamed
 # body is consumed.  Keep each blocking socket read bounded so the cooperative
 # deadline check between chunks cannot stall indefinitely.  Half a second was
@@ -123,6 +135,7 @@ def _normalize_dashboard_payload(payload: Any) -> Dict[str, Any]:
 
     device_sets: set[int] = set()
     electrometers: List[Dict[str, Any]] = []
+    elm_contracts: set[str] = set()
     for item in payload:
         if not isinstance(item, dict):
             raise PndParseError("Dashboard metadata contains a non-object record (ERR_PORTAL)")
@@ -137,28 +150,55 @@ def _normalize_dashboard_payload(payload: Any) -> Dict[str, Any]:
                 raise PndParseError("Dashboard metadata contains an invalid device set (ERR_PORTAL)")
             device_sets.add(device_set)
 
-        electrometer = item.get("electrometerId")
-        if electrometer is not None and not isinstance(electrometer, str):
-            raise PndParseError("Dashboard metadata contains an invalid identifier (ERR_PORTAL)")
-        if isinstance(electrometer, str):
-            electrometer = electrometer.strip()
-            if electrometer:
-                if not re.fullmatch(r"[A-Za-z0-9_-]{1,30}", electrometer):
-                    raise PndParseError("Dashboard metadata contains an invalid identifier (ERR_PORTAL)")
-                meter = {"electrometerId": electrometer}
-                if device_set is not None:
-                    meter["idDeviceSet"] = device_set
-                if item.get("ean") is not None:
-                    if not isinstance(item["ean"], str):
-                        raise PndParseError("Dashboard metadata contains an invalid EAN (ERR_PORTAL)")
-                    meter["ean"] = item["ean"].strip()
-                if meter not in electrometers:
-                    electrometers.append(meter)
+        present_elm_fields = [
+            field for field in DASHBOARD_ELM_FIELDS
+            if field in item and item[field] is not None
+        ]
+        normalized_elms: set[str] = set()
+        for field in present_elm_fields:
+            raw_elm = item[field]
+            if isinstance(raw_elm, bool) or not isinstance(raw_elm, str):
+                raise PndParseError("Dashboard metadata contains an invalid identifier (ERR_PORTAL)")
+            normalized_elm = str(raw_elm).strip()
+            if not normalized_elm:
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,30}", normalized_elm):
+                raise PndParseError("Dashboard metadata contains an invalid identifier (ERR_PORTAL)")
+            normalized_elms.add(normalized_elm)
+            elm_contracts.add({
+                "electrometerId": ELM_CONTRACT_CANONICAL,
+                "elm": ELM_CONTRACT_ALIAS_ELM,
+            }[field])
+        if len(normalized_elms) > 1:
+            raise PndParseError("Dashboard metadata contains conflicting ELM identifiers (ERR_PORTAL)")
+        if normalized_elms:
+            meter = {"electrometerId": next(iter(normalized_elms))}
+            if device_set is not None:
+                meter["idDeviceSet"] = device_set
+            normalized_eans: set[str] = set()
+            if item.get(METER_EAN_FIELD) not in (None, ""):
+                raw_ean = item[METER_EAN_FIELD]
+                if isinstance(raw_ean, bool) or not isinstance(raw_ean, (str, int)):
+                    raise PndParseError("Dashboard metadata contains an invalid EAN (ERR_PORTAL)")
+                normalized_eans.add(str(raw_ean).strip())
+            if normalized_eans:
+                meter["ean"] = next(iter(normalized_eans))
+            if meter not in electrometers:
+                electrometers.append(meter)
 
     if not device_sets:
         raise PndParseError("Dashboard metadata contains a missing or conflicting device set (ERR_PORTAL)")
 
-    result = {"electrometers": electrometers}
+    if not elm_contracts:
+        elm_contract = ELM_CONTRACT_ABSENT
+    elif len(elm_contracts) == 1:
+        elm_contract = next(iter(elm_contracts))
+    else:
+        elm_contract = ELM_CONTRACT_MIXED
+    result = {
+        "electrometers": electrometers,
+        "elmMetadataStatus": elm_contract,
+    }
     if len(device_sets) == 1:
         result["idDeviceSet"] = next(iter(device_sets))
     else:
@@ -289,7 +329,12 @@ class PndHttpClient:
         for name, value in fields.items():
             if name in {"mime", "shape", "report_kind", "exception_type"}:
                 safe_fields[name] = value if isinstance(value, str) else "unknown"
-            elif name in {"bytes", "body_bytes", "body_characters", "item_count", "declared_bytes"}:
+            elif name == "elm_contract":
+                safe_fields[name] = value if value in ELM_CONTRACT_VALUES else "unknown"
+            elif name in {
+                "bytes", "body_bytes", "body_characters", "item_count",
+                "declared_bytes", "records_with_elm", "records_with_device_set",
+            }:
                 safe_fields[name] = value if isinstance(value, int) and value >= 0 else "unknown"
         details = " ".join(f"{key}={value}" for key, value in safe_fields.items())
         _LOGGER.warning("HTTP debug %s", details)
@@ -835,9 +880,25 @@ class PndHttpClient:
                 }
                 if isinstance(data, list):
                     telemetry_fields["item_count"] = len(data)
-                self._debug_http_event("dashboard_parse", "GET", response_url,
-                    response_status, mime=content_type, **telemetry_fields)
-                return _normalize_dashboard_payload(data)
+                self._debug_http_event(
+                    "dashboard_parse", "GET", response_url,
+                    response_status, mime=content_type, **telemetry_fields
+                )
+                normalized = _normalize_dashboard_payload(data)
+                if isinstance(data, list):
+                    contract_fields = {
+                        "elm_contract": normalized.get("elmMetadataStatus"),
+                        "records_with_elm": len(normalized.get("electrometers", [])),
+                        "records_with_device_set": sum(
+                            1 for item in data
+                            if isinstance(item, dict) and item.get("idDeviceSet") is not None
+                        ),
+                    }
+                    self._debug_http_event(
+                        "dashboard_contract", "GET", response_url,
+                        response_status, **contract_fields
+                    )
+                return normalized
         except (PndAuthError, PndTimeoutError, PndPortalError, PndParseError):
             raise
         except Exception:
@@ -864,10 +925,14 @@ class PndHttpClient:
                 for field in (*METER_ELM_FIELDS, METER_EAN_FIELD)
                 if field in item
             }
-            elm = next(
-                (normalized_fields[field] for field in METER_ELM_FIELDS if normalized_fields.get(field)),
-                "",
-            )
+            elms = {
+                normalized_fields[field]
+                for field in METER_ELM_FIELDS
+                if normalized_fields.get(field)
+            }
+            if len(elms) > 1:
+                raise PndParseError("Meter response contains conflicting identifiers (ERR_PORTAL)")
+            elm = next(iter(elms), "")
             ean = normalized_fields.get(METER_EAN_FIELD, "")
             if not elm and not ean:
                 raise PndParseError("Meter response record has no identifier (ERR_PORTAL)")
@@ -902,6 +967,10 @@ class PndHttpClient:
         """
         available_elms, _ = self._parse_meter_records(records)
         available_elms = list(dict.fromkeys(available_elms))
+        if self.elm and not available_elms:
+            raise PndElmUnavailableError(
+                "PND account does not provide an ELM identifier (ERR_ELM_UNAVAILABLE)"
+            )
         matches = []
         for record in records:
             elms, eans = self._parse_meter_records([record])
@@ -999,7 +1068,7 @@ class PndHttpClient:
                 if isinstance(data, list) and len(data) > 0:
                     return self._validate_selected_meter(data, metadata)
                 raise PndParseError("Meter response has an invalid shape (ERR_PORTAL)")
-        except PndElmNotFoundError:
+        except (PndElmNotFoundError, PndElmUnavailableError):
             raise
         except (PndAuthError, PndTimeoutError, PndPortalError, PndParseError):
             raise
