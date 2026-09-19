@@ -55,10 +55,10 @@ _SBOM_ROLES = {
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _EXPECTED_APPLICATION = {
     "type": "application",
-    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.0",
+    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.1",
     "name": "HACS_CEZD_PND",
-    "version": "1.0.0",
-    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.0",
+    "version": "1.0.1",
+    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.1",
 }
 _EXPECTED_SBOM_CLOSURE = {
     "attrs": ("26.1.0", "shared_with_ha_core"),
