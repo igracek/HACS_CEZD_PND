@@ -50,8 +50,6 @@ from .const import (
     ORIGIN_STATE_PREAUTH,
     PREAUTH_ALLOWED_HOSTNAMES,
     URL_PND_LOGIN,
-    mask_ean,
-    mask_elm,
 )
 from .fd_security import SealedReport
 from .url_security import matches_segment_prefix, normalize_url_path
@@ -124,8 +122,7 @@ def _normalize_dashboard_payload(payload: Any) -> Dict[str, Any]:
         raise PndParseError("Dashboard metadata has an invalid list size (ERR_PORTAL)")
 
     device_sets: set[int] = set()
-    electrometers: List[str] = []
-    seen_electrometers: set[str] = set()
+    electrometers: List[Dict[str, Any]] = []
     for item in payload:
         if not isinstance(item, dict):
             raise PndParseError("Dashboard metadata contains a non-object record (ERR_PORTAL)")
@@ -148,17 +145,25 @@ def _normalize_dashboard_payload(payload: Any) -> Dict[str, Any]:
             if electrometer:
                 if not re.fullmatch(r"[A-Za-z0-9_-]{1,30}", electrometer):
                     raise PndParseError("Dashboard metadata contains an invalid identifier (ERR_PORTAL)")
-                if electrometer not in seen_electrometers:
-                    seen_electrometers.add(electrometer)
-                    electrometers.append(electrometer)
+                meter = {"electrometerId": electrometer}
+                if device_set is not None:
+                    meter["idDeviceSet"] = device_set
+                if item.get("ean") is not None:
+                    if not isinstance(item["ean"], str):
+                        raise PndParseError("Dashboard metadata contains an invalid EAN (ERR_PORTAL)")
+                    meter["ean"] = item["ean"].strip()
+                if meter not in electrometers:
+                    electrometers.append(meter)
 
-    if len(device_sets) != 1:
+    if not device_sets:
         raise PndParseError("Dashboard metadata contains a missing or conflicting device set (ERR_PORTAL)")
 
-    return {
-        "idDeviceSet": next(iter(device_sets)),
-        "electrometers": [{"electrometerId": value} for value in electrometers],
-    }
+    result = {"electrometers": electrometers}
+    if len(device_sets) == 1:
+        result["idDeviceSet"] = next(iter(device_sets))
+    else:
+        result["requiresMeterDeviceSet"] = True
+    return result
 
 
 class _BoundedResponseText(str):
@@ -220,7 +225,7 @@ class PndHttpClient:
         if not isinstance(config, dict):
             raise ValueError("Config must be a dictionary")
         self.username = str(config.get(CONF_USERNAME, config.get("username", ""))).strip()
-        self.password = str(config.get(CONF_PASSWORD, config.get("password", ""))).strip()
+        self.password = str(config.get(CONF_PASSWORD, config.get("password", "")))
         self.elm = str(config.get(CONF_ELM, config.get("elm", ""))).strip()
         self.ean = str(config.get(CONF_EAN, config.get("ean", ""))).strip()
         self.debug_mode = config.get(CONF_DEBUG_MODE, DEFAULT_DEBUG_MODE)
@@ -889,6 +894,50 @@ class PndHttpClient:
             )
         return metadata[present_fields[0]]
 
+    def _validate_selected_meter(self, records: List[Any], metadata: Optional[Dict[str, Any]]) -> List[str]:
+        """Validate a single meter and retain its export device set.
+
+        Some dashboard windows expose only ELM; validate EAN whenever the
+        selected meter provides it, never use another meter's EAN as a match.
+        """
+        available_elms, _ = self._parse_meter_records(records)
+        available_elms = list(dict.fromkeys(available_elms))
+        matches = []
+        for record in records:
+            elms, eans = self._parse_meter_records([record])
+            if self.elm:
+                matches_identifier = self.elm in elms
+            else:
+                matches_identifier = self.ean in eans
+            if matches_identifier:
+                if self.ean and eans and self.ean not in eans:
+                    raise PndElmNotFoundError("Configured ELM does not belong to EAN (ERR_ELM_NOT_FOUND)")
+                matches.append(record)
+        if not matches:
+            raise PndElmNotFoundError("Configured meter not found in account (ERR_ELM_NOT_FOUND)")
+        selected_elms = {elm for record in matches for elm in self._parse_meter_records([record])[0]}
+        if len(selected_elms) > 1:
+            raise PndParseError("Configured meter selection is ambiguous (ERR_PORTAL)")
+        device_sets = set()
+        for record in matches:
+            value = record.get("idDeviceSet")
+            if value is not None:
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise PndParseError("Selected meter has an invalid device set (ERR_PORTAL)")
+                device_sets.add(value)
+        if len(device_sets) > 1:
+            raise PndParseError("Selected meter belongs to multiple device sets (ERR_PORTAL)")
+        if metadata is not None:
+            if device_sets:
+                metadata["idDeviceSet"] = next(iter(device_sets))
+            elif metadata.get("requiresMeterDeviceSet") or (
+                any("idDeviceSet" in record for record in records) and not metadata.get("idDeviceSet")
+            ):
+                raise PndParseError("Selected meter has no device set (ERR_PORTAL)")
+        if not self.elm and selected_elms:
+            self.elm = next(iter(selected_elms))
+        return available_elms
+
     def _select_elm(
         self,
         session: requests.Session,
@@ -900,7 +949,6 @@ class PndHttpClient:
         available_elms: List[str] = []
         if not self.elm and not self.ean:
             return available_elms
-        configured_identifier = mask_elm(self.elm) if self.elm else mask_ean(self.ean)
 
         # 1. Check dashboard metadata if provided.  A present empty list is
         # an explicit request to use the API fallback; malformed containers or
@@ -910,14 +958,7 @@ class PndHttpClient:
                 raise PndParseError("Dashboard metadata must be an object (ERR_PORTAL)")
             meters = self._metadata_meter_records(metadata)
             if meters:
-                elm_list, ean_list = self._parse_meter_records(meters)
-                available_elms = elm_list
-                if not (
-                    (self.elm and self.elm in elm_list)
-                    or (self.ean and self.ean in ean_list)
-                ):
-                    raise PndElmNotFoundError(f"Configured meter {configured_identifier} not found in account (ERR_ELM_NOT_FOUND)")
-                return available_elms
+                return self._validate_selected_meter(meters, metadata)
 
         # 2. Check meters API endpoint fallback
         meters_url = "https://pnd.cezdistribuce.cz/cezpnd2/api/v1/consumption/meters"
@@ -956,23 +997,16 @@ class PndHttpClient:
                     body_bytes=read_metadata.get("decoded_bytes"),
                     body_characters=read_metadata.get("body_characters"), shape=shape)
                 if isinstance(data, list) and len(data) > 0:
-                    elm_list, ean_list = self._parse_meter_records(data)
-                    available_elms = elm_list
-                    if not (
-                        (self.elm and self.elm in elm_list)
-                        or (self.ean and self.ean in ean_list)
-                    ):
-                        raise PndElmNotFoundError(f"Configured meter {configured_identifier} not found in account (ERR_ELM_NOT_FOUND)")
-                    return available_elms
+                    return self._validate_selected_meter(data, metadata)
                 raise PndParseError("Meter response has an invalid shape (ERR_PORTAL)")
         except PndElmNotFoundError:
             raise
         except (PndAuthError, PndTimeoutError, PndPortalError, PndParseError):
             raise
-        except Exception:
-            return available_elms
+        except Exception as err:
+            raise PndPortalError("Meter selection could not be verified (ERR_PORTAL)") from err
 
-        return available_elms
+        raise PndPortalError("Meter selection could not be verified (ERR_PORTAL)")
 
     def _format_date_param(self, date_str: str) -> str:
         """Format date string to DD.MM.YYYY 00:00 as required by export API endpoint."""

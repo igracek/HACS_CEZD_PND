@@ -9,7 +9,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, PLATFORMS
+from .const import CONF_CLIENT_MODE, DEFAULT_CLIENT_MODE, DOMAIN, PLATFORMS
 from .coordinator import CezPndCoordinator
 from .services import async_setup_services, async_unload_services
 
@@ -35,6 +35,12 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up CEZ Distribuce PND from a config entry (HA 2026.8+ lifecycle)."""
+    # Persist the shared default before validation/runtime can diverge on
+    # legacy entries. Explicit selections in either storage remain untouched.
+    if CONF_CLIENT_MODE not in entry.data and CONF_CLIENT_MODE not in entry.options:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_CLIENT_MODE: DEFAULT_CLIENT_MODE}
+        )
     coordinator = CezPndCoordinator(hass, entry)
     entry.runtime_data = coordinator
 

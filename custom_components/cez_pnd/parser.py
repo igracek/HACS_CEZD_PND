@@ -922,21 +922,14 @@ class PndCsvParser:
         ) or os.path.join(download_dir, "daily-production.csv")
 
         # Parse intervals with profile validation
-        try:
-            cons_intervals = self._parse_interval_file(consumption_file, expected_profile="+A")
-        except (PndParseError, FileNotFoundError, OSError):
-            cons_intervals = {}
+        cons_intervals = self._parse_interval_file(consumption_file, expected_profile="+A")
+        if not cons_intervals:
+            raise PndParseError("No valid consumption interval records found (ERR_PARSER)")
 
         try:
             prod_intervals = self._parse_interval_file(production_file, expected_profile="-A")
-        except (PndParseError, FileNotFoundError, OSError):
+        except FileNotFoundError:
             prod_intervals = {}
-
-        # SEC10-02 (CWE-252, CWE-682): Atomic rejection if no valid interval records exist
-        if not cons_intervals and not prod_intervals:
-            raise PndParseError(
-                f"No valid interval records found in download directory: {download_dir} (ERR_PARSER)"
-            )
 
         # Collect all start times
         all_start_times = sorted(set(cons_intervals.keys()) | set(prod_intervals.keys()))
@@ -948,7 +941,7 @@ class PndCsvParser:
             else:
                 end_time, _, _ = prod_intervals[st]
                 cons_kwh = 0.0
-                is_valid_cons = True
+                is_valid_cons = False
 
             if st in prod_intervals:
                 _, prod_kwh, is_valid_prod = prod_intervals[st]

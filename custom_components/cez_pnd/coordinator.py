@@ -503,11 +503,11 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
 
     def _get_client(self) -> Any:
         """Instantiate client (PndHttpClient or PndScraperClient) based on config_entry mode."""
-        client_mode = CLIENT_MODE_BROWSER
+        client_mode = DEFAULT_CLIENT_MODE
         if hasattr(self, "config_entry") and self.config_entry is not None:
             client_mode = self.config_entry.options.get(
                 CONF_CLIENT_MODE,
-                self.config_entry.data.get(CONF_CLIENT_MODE, CLIENT_MODE_BROWSER),
+                self.config_entry.data.get(CONF_CLIENT_MODE, DEFAULT_CLIENT_MODE),
             )
 
         current_scraper = getattr(self, "scraper", None)

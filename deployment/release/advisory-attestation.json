@@ -1,8 +1,8 @@
 {
   "artifacts": {
     "lock_sha256": "e6c0da54a0a461e36676d6b13e12b388400210778cb5747b997ec7eae2a30818",
-    "manifest_sha256": "462b4f44ee665020ef401197a6cdd6aaa631b485471b8aeb2de5982d0ae8a3fd",
-    "sbom_sha256": "40c030e0d903fd0dcf5afdb41d7eb871cd85407f480627f48a94683294cf4691"
+    "manifest_sha256": "5c5f3de3fab09e3c69341215fb5ef66b4565e93f65007de00fa5d398e00af5fe",
+    "sbom_sha256": "95f010f3acba2792717b821b2dcd7ef1420d9cdd6bfd8bac930d60a59cb5e69e"
   },
   "baseline": {
     "home_assistant": "2026.8.3",

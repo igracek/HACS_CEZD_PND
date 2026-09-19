@@ -365,7 +365,7 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry = self._get_context_entry()
 
         if user_input is not None and entry is not None:
-            new_password = str(user_input.get(CONF_PASSWORD, "")).strip()
+            new_password = str(user_input.get(CONF_PASSWORD, ""))
             test_config = _entry_client_config(
                 entry,
                 {CONF_PASSWORD: new_password},
@@ -429,8 +429,9 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             elif submitted_ean != existing_ean:
                 errors["base"] = "cannot_change_ean"
 
-            elm = str(user_input.get(CONF_ELM, entry.data.get(CONF_ELM, ""))).strip()
-            scan_time = str(user_input.get(CONF_SCAN_TIME, DEFAULT_SCAN_TIME)).strip()
+            effective_config = _entry_client_config(entry)
+            elm = str(user_input.get(CONF_ELM, effective_config.get(CONF_ELM, ""))).strip()
+            scan_time = str(user_input.get(CONF_SCAN_TIME, effective_config.get(CONF_SCAN_TIME, DEFAULT_SCAN_TIME))).strip()
 
             if errors:
                 pass
@@ -439,11 +440,18 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             elif not validate_scan_time(scan_time):
                 errors["base"] = "invalid_scan_time"
             else:
-                updated_data = {**entry.data, **user_input, CONF_EAN: existing_ean}
-                test_config = _entry_client_config(
-                    entry,
-                    {**user_input, CONF_EAN: existing_ean},
-                )
+                updates = {
+                    **user_input,
+                    CONF_EAN: existing_ean,
+                    CONF_ELM: elm,
+                    CONF_SCAN_TIME: scan_time,
+                    CONF_CLIENT_MODE: effective_config.get(CONF_CLIENT_MODE, DEFAULT_CLIENT_MODE),
+                }
+                updated_data = {**entry.data, **updates}
+                # Remove stale options for edited fields so reload uses exactly
+                # the values which passed credential validation.
+                updated_options = {key: value for key, value in entry.options.items() if key not in updates}
+                test_config = {**effective_config, **updates}
                 try:
                     await _test_credentials(self.hass, test_config)
                 except PndAuthError:
@@ -464,11 +472,11 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 if not errors:
                     if hasattr(self, "async_update_reload_and_abort"):
-                        return self.async_update_reload_and_abort(entry, data=updated_data)
-                    self.hass.config_entries.async_update_entry(entry, data=updated_data)
+                        return self.async_update_reload_and_abort(entry, data=updated_data, options=updated_options)
+                    self.hass.config_entries.async_update_entry(entry, data=updated_data, options=updated_options)
                     return self.async_abort(reason="reconfigure_successful")
 
-        current_data = entry.data if entry else {}
+        current_data = _entry_client_config(entry) if entry else {}
         schema = vol.Schema({
             vol.Required(CONF_USERNAME, default=current_data.get(CONF_USERNAME, "")): vol.All(cv.string, vol.Length(max=MAX_CREDENTIAL_LENGTH)),
             vol.Required(CONF_PASSWORD, default=current_data.get(CONF_PASSWORD, "")): selector.TextSelector(
@@ -544,7 +552,7 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
             if not errors:
                 # If user entered a new password, verify and update ConfigEntry.data
                 if new_password and str(new_password).strip():
-                    new_pwd_clean = str(new_password).strip()
+                    new_pwd_clean = str(new_password)
                     test_config = _entry_client_config(
                         entry,
                         {**user_input, CONF_PASSWORD: new_pwd_clean},
