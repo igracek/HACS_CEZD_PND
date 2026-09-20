@@ -155,7 +155,7 @@ Vygenerovaný JSON soubor obsahuje:
 - **Všechny citlivé údaje (hesla, tokeny, celé EAN a systémové či binární cesty) jsou striktně anonymizovány (redacted) bez úniku souborových cest.**
 
 ### 2. Opt-in záchyty chyb portálu PND (Error Dumps)
-Při zapnutém ladicím režimu (`debug_mode: true`) a jakémkoliv selhání na webu ČEZ PND (CAPTCHA, zablokovaný účet, odstávka portálu, nenalezení ELM nebo chybějící tlačítko exportu) scraper vytvoří sadu ladicích souborů do složky `/config/cez_pnd_debug/`:
+Souborové záchyty jsou dostupné jen v režimu prohlížeče a pouze v bezpečné předpřihlašovací fázi. Přímý HTTP režim z bezpečnostních důvodů zapisuje diagnostické fáze a technické údaje pouze do HA logu; samotné zapnutí `debug_mode` v tomto režimu složku `/config/cez_pnd_debug/` nevytvoří. Pokud prohlížeč v povolené fázi záchyt vytvoří, může obsahovat:
 - `<timestamp>_error.png` – snímek obrazovky v okamžiku chyby (striktně zakázán po zadání přihlašovacích údajů).
 - `<timestamp>_dom.html` – kompletní DOM strom stránky se sanitizovanými hesly, tokeny a skripty.
 - `<timestamp>_meta.json` – metadata chyby (sanitizované chybové kódy `ERR_*`, maskovaný identifikátor ELM/EAN).
@@ -176,6 +176,9 @@ logger:
 ## 🛠️ Poskytované služby (Services)
 
 - `cez_pnd.fetch_data`: Spustí okamžité stažení dat. Volitelný parametr `date_range` (např. `"01.08.2026 - 15.08.2026"`, max 60 dní) umožňuje zpětné dočtení historických dat (backfilling).
+- `cez_pnd.test_export_scenarios`: Bez zápisu do statistik otestuje dostupné varianty exportu (`idDeviceSet + ELM`, jednoznačný `idDeviceSet`, ověřené ELM). Vrací pouze bezpečné stavové kódy. Pokud je nakonfigurováno více odběrných míst, přijímá parametr `ean`.
+
+HTTP export nejprve používá dosavadní kombinaci ověřeného `idDeviceSet + ELM`. Při technickém selhání postupně zkusí pouze varianty, jejichž identitu předem ověřil dashboard/meters kontrakt. Pokud PND ELM neposkytuje, je `idDeviceSet` použit jen tehdy, když je v autentizovaném účtu jednoznačný. Neshoda ELM/EAN nebo víceznačný výběr export zastaví, zapíše bezpečný důvod do logu a zobrazí trvalé oznámení v Home Assistantu.
 
 ---
 
