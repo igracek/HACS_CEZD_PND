@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 import voluptuous as vol
 
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.service import async_register_admin_service
@@ -18,6 +18,7 @@ from .const import (
     ATTR_EAN,
     DOMAIN,
     SERVICE_FETCH_DATA,
+    SERVICE_TEST_EXPORT_SCENARIOS,
 )
 from .coordinator import CezPndCoordinator
 
@@ -113,6 +114,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             _LOGGER.info("Executing manual refresh of yesterday's data for EAN %s", coordinator.masked_ean)
             await coordinator.async_request_refresh()
 
+    async def handle_test_export_scenarios(call: ServiceCall) -> Dict[str, Any]:
+        """Probe selector variants without importing any statistics."""
+        target_ean = call.data.get(ATTR_EAN)
+        if target_ean:
+            validate_ean(target_ean)
+        coordinator = _get_coordinator(hass, call)
+        _LOGGER.info("Testing PND export scenarios for EAN %s", coordinator.masked_ean)
+        return await coordinator.async_test_export_scenarios()
+
     if not hass.services.has_service(DOMAIN, SERVICE_FETCH_DATA):
         async_register_admin_service(
             hass,
@@ -120,6 +130,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             SERVICE_FETCH_DATA,
             handle_fetch_data,
             schema=FETCH_DATA_SCHEMA,
+        )
+    if not hass.services.has_service(DOMAIN, SERVICE_TEST_EXPORT_SCENARIOS):
+        async_register_admin_service(
+            hass,
+            DOMAIN,
+            SERVICE_TEST_EXPORT_SCENARIOS,
+            handle_test_export_scenarios,
+            schema=vol.Schema({vol.Optional(ATTR_EAN): cv.string}),
+            supports_response=SupportsResponse.ONLY,
         )
 
 
@@ -137,3 +156,5 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     if not has_active_entries:
         if hass.services.has_service(DOMAIN, SERVICE_FETCH_DATA):
             hass.services.async_remove(DOMAIN, SERVICE_FETCH_DATA)
+        if hass.services.has_service(DOMAIN, SERVICE_TEST_EXPORT_SCENARIOS):
+            hass.services.async_remove(DOMAIN, SERVICE_TEST_EXPORT_SCENARIOS)

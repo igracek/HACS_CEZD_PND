@@ -116,6 +116,15 @@ ASSEMBLY_RANGE_PRODUCTION: Final = "-1002"
 ASSEMBLY_DAILY_CONSUMPTION: Final = "-1021"
 ASSEMBLY_DAILY_PRODUCTION: Final = "-1022"
 
+EXPORT_SELECTOR_BOTH: Final = "device_set_and_elm"
+EXPORT_SELECTOR_DEVICE_SET: Final = "device_set_only"
+EXPORT_SELECTOR_ELM: Final = "elm_only"
+EXPORT_SELECTOR_VALUES: Final = (
+    EXPORT_SELECTOR_BOTH,
+    EXPORT_SELECTOR_DEVICE_SET,
+    EXPORT_SELECTOR_ELM,
+)
+
 
 def _normalize_dashboard_payload(payload: Any) -> Dict[str, Any]:
     """Normalize the current dashboard list response without trusting it.
@@ -1105,8 +1114,18 @@ class PndHttpClient:
         date_to: Optional[str] = None,
         stop_event: Optional[threading.Event] = None,
         deadline: Optional[float] = None,
+        selector_mode: Optional[str] = None,
     ) -> str:
         """Download and atomically store a bounded, validated CSV response."""
+        strict_selector = selector_mode is not None
+        if selector_mode is None:
+            selector_mode = (
+                EXPORT_SELECTOR_BOTH if id_device_set and self.elm
+                else EXPORT_SELECTOR_DEVICE_SET if id_device_set
+                else EXPORT_SELECTOR_ELM
+            )
+        if selector_mode not in EXPORT_SELECTOR_VALUES:
+            raise PndPortalError("Invalid export selector mode (ERR_PORTAL)")
         if os.path.basename(filename) != filename:
             raise PndPortalError("Invalid report filename (ERR_PORTAL)")
         os.makedirs(download_dir, mode=0o700, exist_ok=True)
@@ -1116,14 +1135,20 @@ class PndHttpClient:
             "format": "csv",
             "idAssembly": assembly_id,
         }
-        if id_device_set:
+        if selector_mode in (EXPORT_SELECTOR_BOTH, EXPORT_SELECTOR_DEVICE_SET) and id_device_set:
             params["idDeviceSet"] = id_device_set
         if date_from:
             params["intervalFrom"] = self._format_date_param(date_from)
         if date_to:
             params["intervalTo"] = self._format_date_param(date_to)
-        if self.elm:
+        if selector_mode in (EXPORT_SELECTOR_BOTH, EXPORT_SELECTOR_ELM) and self.elm:
             params["electrometerId"] = self.elm
+        if strict_selector and selector_mode == EXPORT_SELECTOR_BOTH and not (id_device_set and self.elm):
+            raise PndPortalError("Combined export selector is incomplete (ERR_PORTAL)")
+        if strict_selector and selector_mode == EXPORT_SELECTOR_DEVICE_SET and not id_device_set:
+            raise PndPortalError("Device-set export selector is incomplete (ERR_PORTAL)")
+        if strict_selector and selector_mode == EXPORT_SELECTOR_ELM and not self.elm:
+            raise PndPortalError("ELM export selector is incomplete (ERR_PORTAL)")
 
         headers = {
             "Referer": URL_PND_LOGIN,
@@ -1280,6 +1305,134 @@ class PndHttpClient:
             if directory_fd is not None:
                 os.close(directory_fd)
 
+    def _export_selector_plan(
+        self,
+        session: requests.Session,
+        metadata: Dict[str, Any],
+        stop_event: Optional[threading.Event] = None,
+        deadline: Optional[float] = None,
+    ) -> Tuple[Optional[str], List[str], str]:
+        """Return a fail-closed, ordered selector plan and its identity basis."""
+        id_device_set = str(metadata.get("idDeviceSet", "")) if metadata.get("idDeviceSet") else None
+        if metadata.get("elmMetadataStatus") == ELM_CONTRACT_ABSENT:
+            if not id_device_set or metadata.get("requiresMeterDeviceSet"):
+                raise PndElmUnavailableError(
+                    "PND does not expose ELM and the device set is ambiguous (ERR_ELM_UNAVAILABLE)"
+                )
+            _LOGGER.warning(
+                "PND identity check result=elm_unavailable basis=single_device_set; "
+                "skipping unsupported meter lookup and using device-set-only export"
+            )
+            return id_device_set, [EXPORT_SELECTOR_DEVICE_SET], "single_device_set"
+        try:
+            self._select_elm(session, metadata, stop_event, deadline)
+        except PndElmUnavailableError:
+            if not id_device_set or metadata.get("requiresMeterDeviceSet"):
+                raise
+            _LOGGER.warning(
+                "PND identity check result=elm_unavailable basis=single_device_set; "
+                "using restricted device-set-only fallback"
+            )
+            return id_device_set, [EXPORT_SELECTOR_DEVICE_SET], "single_device_set"
+
+        id_device_set = str(metadata.get("idDeviceSet", "")) if metadata.get("idDeviceSet") else None
+        plan: List[str] = []
+        if id_device_set and self.elm:
+            plan.append(EXPORT_SELECTOR_BOTH)
+        if id_device_set:
+            plan.append(EXPORT_SELECTOR_DEVICE_SET)
+        if self.elm:
+            plan.append(EXPORT_SELECTOR_ELM)
+        if not plan:
+            if not self.ean and not self.elm:
+                # Compatibility for isolated low-level tests; real config
+                # entries always carry an EAN and are rejected fail-closed.
+                return None, [EXPORT_SELECTOR_ELM], "test_only_unconfigured"
+            raise PndElmUnavailableError("No verified export selector is available (ERR_ELM_UNAVAILABLE)")
+        return id_device_set, plan, "verified_meter"
+
+    @staticmethod
+    def _scenario_reason(err: Exception) -> str:
+        """Map an export error to a bounded, identifier-free reason code."""
+        if isinstance(err, PndTimeoutError):
+            return "timeout"
+        if isinstance(err, PndReportUnavailableError):
+            return "report_unavailable"
+        if isinstance(err, PndAuthError):
+            return "authentication"
+        if isinstance(err, PndPortalError):
+            return "portal_response"
+        return "unexpected"
+
+    def _fetch_csv_with_fallback(
+        self,
+        session: requests.Session,
+        download_dir: str,
+        filename: str,
+        assembly_id: str,
+        selector_plan: List[str],
+        id_device_set: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        stop_event: Optional[threading.Event] = None,
+        deadline: Optional[float] = None,
+    ) -> Tuple[str, str]:
+        """Try verified selectors in order and return path plus selected mode."""
+        last_error: Optional[Exception] = None
+        for selector_mode in selector_plan:
+            try:
+                path = self._fetch_csv_report(
+                    session, download_dir, filename, assembly_id,
+                    id_device_set=id_device_set, date_from=date_from, date_to=date_to,
+                    stop_event=stop_event, deadline=deadline, selector_mode=selector_mode,
+                )
+                _LOGGER.info("PND export scenario succeeded scenario=%s", selector_mode)
+                return path, selector_mode
+            except (PndReportUnavailableError, PndPortalError, PndTimeoutError) as err:
+                last_error = err
+                _LOGGER.warning(
+                    "PND export scenario failed scenario=%s reason=%s",
+                    selector_mode,
+                    self._scenario_reason(err),
+                )
+        if last_error is not None:
+            raise last_error
+        raise PndPortalError("No export scenario was attempted (ERR_PORTAL)")
+
+    def test_export_scenarios(
+        self,
+        download_dir: str,
+        stop_event: Optional[threading.Event] = None,
+        deadline: Optional[float] = None,
+        hass_config_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Probe eligible export selectors without importing data into HA."""
+        session = requests.Session()
+        session.headers.update({"User-Agent": DEFAULT_USER_AGENT})
+        results: Dict[str, str] = {mode: "not_eligible" for mode in EXPORT_SELECTOR_VALUES}
+        try:
+            self._login(session, stop_event, deadline)
+            metadata = self._fetch_dashboard_metadata(session, stop_event, deadline)
+            id_device_set, plan, identity_basis = self._export_selector_plan(
+                session, metadata, stop_event, deadline
+            )
+            yesterday = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
+            today = datetime.now().strftime("%d.%m.%Y")
+            for selector_mode in plan:
+                try:
+                    self._fetch_csv_report(
+                        session, download_dir,
+                        f"test-{selector_mode}.csv", ASSEMBLY_RANGE_CONSUMPTION,
+                        id_device_set=id_device_set, date_from=yesterday, date_to=today,
+                        stop_event=stop_event, deadline=deadline, selector_mode=selector_mode,
+                    )
+                    results[selector_mode] = "success"
+                except (PndReportUnavailableError, PndPortalError, PndTimeoutError) as err:
+                    results[selector_mode] = self._scenario_reason(err)
+            return {"identity_basis": identity_basis, "scenarios": results}
+        finally:
+            session.close()
+
     def test_login(
         self,
         temp_dir: Optional[str] = None,
@@ -1315,17 +1468,18 @@ class PndHttpClient:
             self._debug_operation_phase("yesterday_metadata")
             metadata = self._fetch_dashboard_metadata(session, stop_event, deadline)
             self._debug_operation_phase("yesterday_meter")
-            self._select_elm(session, metadata, stop_event, deadline)
-
-            id_device_set = str(metadata.get("idDeviceSet", "")) if metadata.get("idDeviceSet") else None
+            id_device_set, selector_plan, _identity_basis = self._export_selector_plan(
+                session, metadata, stop_event, deadline
+            )
             yesterday = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
             today = datetime.now().strftime("%d.%m.%Y")
 
             # 1. Download 15-min interval range consumption (+A) - idAssembly -1001
             self._debug_operation_phase("yesterday_range_consumption")
-            range_cons = self._fetch_csv_report(
+            range_cons, selected_scenario = self._fetch_csv_with_fallback(
                 session, download_dir, "range-consumption.csv", ASSEMBLY_RANGE_CONSUMPTION,
-                id_device_set=id_device_set, date_from=yesterday, date_to=today,
+                selector_plan=selector_plan, id_device_set=id_device_set,
+                date_from=yesterday, date_to=today,
                 stop_event=stop_event, deadline=deadline
             )
 
@@ -1335,7 +1489,7 @@ class PndHttpClient:
                 range_prod = self._fetch_csv_report(
                     session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
                     id_device_set=id_device_set, date_from=yesterday, date_to=today,
-                    stop_event=stop_event, deadline=deadline
+                    stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario
                 )
             except PndReportUnavailableError:
                 range_prod = ""
@@ -1345,7 +1499,7 @@ class PndHttpClient:
             daily_cons = self._fetch_csv_report(
                 session, download_dir, "daily-consumption.csv", ASSEMBLY_DAILY_CONSUMPTION,
                 id_device_set=id_device_set, date_from=yesterday, date_to=yesterday,
-                stop_event=stop_event, deadline=deadline
+                stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario
             )
 
             # 4. Download Daily Production (-A) - idAssembly -1022
@@ -1354,7 +1508,7 @@ class PndHttpClient:
                 daily_prod = self._fetch_csv_report(
                     session, download_dir, "daily-production.csv", ASSEMBLY_DAILY_PRODUCTION,
                     id_device_set=id_device_set, date_from=yesterday, date_to=yesterday,
-                    stop_event=stop_event, deadline=deadline
+                    stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario
                 )
             except PndReportUnavailableError:
                 daily_prod = ""
@@ -1394,9 +1548,9 @@ class PndHttpClient:
             self._debug_operation_phase("custom_metadata")
             metadata = self._fetch_dashboard_metadata(session, stop_event, deadline)
             self._debug_operation_phase("custom_meter")
-            self._select_elm(session, metadata, stop_event, deadline)
-
-            id_device_set = str(metadata.get("idDeviceSet", "")) if metadata.get("idDeviceSet") else None
+            id_device_set, selector_plan, _identity_basis = self._export_selector_plan(
+                session, metadata, stop_event, deadline
+            )
             dates = date_range.split(" - ")
             date_from = dates[0].strip() if len(dates) > 0 else ""
             date_to_raw = dates[1].strip() if len(dates) > 1 else date_from
@@ -1414,9 +1568,10 @@ class PndHttpClient:
                     date_to = (parsed_dt + timedelta(days=1)).strftime("%d.%m.%Y")
 
             self._debug_operation_phase("custom_range_consumption")
-            range_cons = self._fetch_csv_report(
+            range_cons, selected_scenario = self._fetch_csv_with_fallback(
                 session, download_dir, "range-consumption.csv", ASSEMBLY_RANGE_CONSUMPTION,
-                id_device_set=id_device_set, date_from=date_from, date_to=date_to,
+                selector_plan=selector_plan, id_device_set=id_device_set,
+                date_from=date_from, date_to=date_to,
                 stop_event=stop_event, deadline=deadline
             )
 
@@ -1424,7 +1579,7 @@ class PndHttpClient:
             range_prod = self._fetch_csv_report(
                 session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
                 id_device_set=id_device_set, date_from=date_from, date_to=date_to,
-                stop_event=stop_event, deadline=deadline
+                stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario
             )
 
             if not os.path.exists(range_cons):

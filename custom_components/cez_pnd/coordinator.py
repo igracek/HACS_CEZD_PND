@@ -10,6 +10,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from homeassistant.core import HomeAssistant
+from homeassistant.components import persistent_notification
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.event import async_call_later, async_track_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -19,6 +20,7 @@ from .client import (
     PndAuthError,
     PndCaptchaError,
     PndElmNotFoundError,
+    PndElmUnavailableError,
     PndInsecureBrowserError,
     PndMaintenanceError,
     PndParseError,
@@ -407,7 +409,7 @@ def _map_exception_to_error_code(err: Exception) -> str:
         return ERR_CAPTCHA
     if isinstance(err, PndAccountLockedError):
         return ERR_LOCKED
-    if isinstance(err, PndElmNotFoundError):
+    if isinstance(err, (PndElmNotFoundError, PndElmUnavailableError)):
         return ERR_ELM_NOT_FOUND
     if isinstance(err, PndMaintenanceError):
         return ERR_MAINTENANCE
@@ -500,6 +502,29 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         self._unsub_schedule: Optional[Callable[[], None]] = None
         self._unsub_retry: Optional[Callable[[], None]] = None
         self._retry_scheduled: bool = False
+
+    @property
+    def _identity_notification_id(self) -> str:
+        """Stable notification id that contains no customer identifier."""
+        return f"cez_pnd_identity_{self.entry.entry_id}"
+
+    def _notify_identity_problem(self, err: Exception) -> None:
+        """Create or replace an actionable HA notification for identity failures."""
+        detail = (
+            "PND pro tento účet neposkytuje ELM a nelze bezpečně určit odběrné místo."
+            if isinstance(err, PndElmUnavailableError)
+            else "Nastavené ELM/EAN neodpovídá odběrnému místu vrácenému portálem PND."
+        )
+        persistent_notification.async_create(
+            self.hass,
+            f"{detail} Zkontrolujte ELM a EAN v nastavení integrace a spusťte její rekonfiguraci.",
+            title="ČEZ PND: kontrola ELM/EAN selhala",
+            notification_id=self._identity_notification_id,
+        )
+
+    def _clear_identity_problem(self) -> None:
+        """Dismiss a previous identity warning after a verified successful sync."""
+        persistent_notification.async_dismiss(self.hass, self._identity_notification_id)
 
     def _get_client(self) -> Any:
         """Instantiate client (PndHttpClient or PndScraperClient) based on config_entry mode."""
@@ -679,6 +704,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     debug_artifacts_created=list(self.scraper.last_debug_artifacts),
                 )
                 self.last_sync_result = sync_result
+                self._clear_identity_problem()
                 return sync_result
 
         except (TimeoutError, asyncio.TimeoutError, PndTimeoutError) as err:
@@ -713,6 +739,9 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                 if not self._retry_scheduled:
                     self._retry_scheduled = True
                     self._unsub_retry = async_call_later(self.hass, 3600, self._async_retry_maintenance)
+
+            if isinstance(err, (PndElmNotFoundError, PndElmUnavailableError)):
+                self._notify_identity_problem(err)
 
             self.last_sync_result = SyncResult(
                 duration_seconds=duration,
@@ -817,6 +846,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                 )
                 self.last_sync_result = sync_result
                 self.async_set_updated_data(sync_result)
+                self._clear_identity_problem()
                 return sync_result
 
         except (TimeoutError, asyncio.TimeoutError, PndTimeoutError) as err:
@@ -845,6 +875,8 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             err_msg = _map_error_code_to_message(err_code)
 
             _LOGGER.error("PND custom range fetch failed for EAN %s (%s)", self.masked_ean, err_code)
+            if isinstance(err, (PndElmNotFoundError, PndElmUnavailableError)):
+                self._notify_identity_problem(err)
             self.last_sync_result = SyncResult(
                 duration_seconds=duration,
                 status="Error",
@@ -860,6 +892,55 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
 
         finally:
             close_sealed_reports(downloaded_paths.values() if isinstance(downloaded_paths, dict) else None)
+            self.is_running = False
+            if ownership is not None:
+                await ownership.async_release_or_schedule()
+            else:
+                if temp_dir:
+                    await _async_safe_remove_dir(self.hass, temp_dir)
+                GLOBAL_BROWSER_SEMAPHORE.release()
+            self.async_update_listeners()
+
+    async def async_test_export_scenarios(self) -> Dict[str, Any]:
+        """Probe HTTP export scenarios without parsing or importing statistics."""
+        if not isinstance(self._get_client(), PndHttpClient):
+            raise HomeAssistantError("Test export scenarios is available only in HTTP mode")
+        if self.is_running:
+            raise HomeAssistantError("Synchronization is already in progress")
+
+        temp_dir = ""
+        stop_event = threading.Event()
+        deadline = time.monotonic() + 115.0
+        ownership: Optional[BrowserWorkerOwnership] = None
+        await GLOBAL_BROWSER_SEMAPHORE.acquire()
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="cez_pnd_probe_")
+            ownership = BrowserWorkerOwnership(
+                semaphore=GLOBAL_BROWSER_SEMAPHORE,
+                temp_dir=temp_dir,
+                stop_event=stop_event,
+                hass=self.hass,
+            )
+            self.is_running = True
+            self.scraper = self._get_client()
+            async with asyncio.timeout(120):
+                worker = self.hass.async_add_executor_job(
+                    self.scraper.test_export_scenarios,
+                    temp_dir,
+                    stop_event,
+                    deadline,
+                    self._get_hass_config_path(),
+                )
+                worker = ownership.set_future(worker)
+                return await asyncio.shield(worker)
+        except (PndElmNotFoundError, PndElmUnavailableError) as err:
+            stop_event.set()
+            self._notify_identity_problem(err)
+            raise HomeAssistantError(_map_error_code_to_message(ERR_ELM_NOT_FOUND)) from err
+        except (TimeoutError, asyncio.TimeoutError, PndTimeoutError) as err:
+            stop_event.set()
+            raise HomeAssistantError(_map_error_code_to_message(ERR_TIMEOUT)) from err
+        finally:
             self.is_running = False
             if ownership is not None:
                 await ownership.async_release_or_schedule()

@@ -142,6 +142,7 @@ STATISTIC_PRODUCTION: Final = "production"
 
 # Services
 SERVICE_FETCH_DATA: Final = "fetch_data"
+SERVICE_TEST_EXPORT_SCENARIOS: Final = "test_export_scenarios"
 ATTR_DATE_RANGE: Final = "date_range"
 ATTR_EAN: Final = "ean"
 

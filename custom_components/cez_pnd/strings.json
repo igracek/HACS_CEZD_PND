@@ -101,6 +101,16 @@
           "description": "Optional date range in DD.MM.YYYY - DD.MM.YYYY format."
         }
       }
+    },
+    "test_export_scenarios": {
+      "name": "Test PND export scenarios",
+      "description": "Probe safe export identifier variants without importing statistics. Administrator only.",
+      "fields": {
+        "ean": {
+          "name": "EAN code",
+          "description": "Select the integration entry when multiple measurement points exist."
+        }
+      }
     }
   },
   "selector": {

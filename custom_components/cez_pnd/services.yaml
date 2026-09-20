@@ -16,3 +16,15 @@ fetch_data:
       example: "01.08.2026 - 15.08.2026"
       selector:
         text:
+
+test_export_scenarios:
+  name: Otestovat scénáře exportu PND
+  description: Bez zápisu do statistik prověří bezpečné varianty identifikace exportu. Vrací pouze stavové kódy bez EAN, ELM a přihlašovacích údajů. Tuto službu mohou volat pouze administrátoři.
+  fields:
+    ean:
+      name: EAN kód
+      description: Výběr konfigurace při více odběrných místech. Do výsledku ani logu se nezapisuje v otevřeném tvaru.
+      required: false
+      example: "859182400123456789"
+      selector:
+        text:

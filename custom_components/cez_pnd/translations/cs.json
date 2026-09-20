@@ -100,6 +100,16 @@
           "description": "Volitelný rozsah datumů ve formátu DD.MM.YYYY - DD.MM.YYYY."
         }
       }
+    },
+    "test_export_scenarios": {
+      "name": "Otestovat scénáře exportu PND",
+      "description": "Bez zápisu do statistik prověří bezpečné varianty identifikace exportu. Pouze pro správce.",
+      "fields": {
+        "ean": {
+          "name": "EAN kód",
+          "description": "Výběr konfigurace při více odběrných místech."
+        }
+      }
     }
   },
   "selector": {
