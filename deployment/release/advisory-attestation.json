@@ -1,7 +1,7 @@
 {
   "artifacts": {
     "lock_sha256": "e6c0da54a0a461e36676d6b13e12b388400210778cb5747b997ec7eae2a30818",
-    "manifest_sha256": "861e46e76e6585dec319f79c225371fbbc8e3750d31396c7b585bf6934e7788a",
+    "manifest_sha256": "48614ae0968d780b90e1d51204b0feb0eb2cd6d446dfc60d3bf2792aa0a24851",
     "sbom_sha256": "b5c187a16190b02a9b9486d1ee3a8ba3adb03c1a47c1a2559dcacfdf67a96f35"
   },
   "baseline": {
@@ -22,25 +22,101 @@
   },
   "known_vulnerability_ids": [],
   "packages": [
-    {"name": "attrs", "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", "version": "26.1.0"},
-    {"name": "beautifulsoup4", "sha256": "d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9", "version": "4.15.0"},
-    {"name": "certifi", "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775", "version": "2026.7.22"},
-    {"name": "charset-normalizer", "sha256": "ce571ab16d890d23b5c278547ba694193a45011ff86a9162a71307ed9f86759a", "version": "3.4.3"},
-    {"name": "h11", "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", "version": "0.16.0"},
-    {"name": "idna", "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4", "version": "3.19"},
-    {"name": "outcome", "sha256": "e771c5ce06d1415e356078d3bdd68523f284b4ce5419828922b6871e65eda82b", "version": "1.3.0.post0"},
-    {"name": "pysocks", "sha256": "2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5", "version": "1.7.1"},
-    {"name": "requests", "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0", "version": "2.34.2"},
-    {"name": "selenium", "sha256": "0d1de9ec6977aa2d5f766d923d5076fdffa91681a8d4ffc9e3381a36839a20f2", "version": "4.49.0"},
-    {"name": "sniffio", "sha256": "2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", "version": "1.3.1"},
-    {"name": "sortedcontainers", "sha256": "a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", "version": "2.4.0"},
-    {"name": "soupsieve", "sha256": "8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823", "version": "2.9.2"},
-    {"name": "trio", "sha256": "6c7c9f49917694dcdcd5f67abd168df5599eca480d61f29854d17a61a75c2f05", "version": "0.34.0"},
-    {"name": "trio-websocket", "sha256": "df605665f1db533f4a386c94525870851096a223adcb97f72a07e8b4beba45b6", "version": "0.12.2"},
-    {"name": "typing-extensions", "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", "version": "4.16.0"},
-    {"name": "urllib3", "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897", "version": "2.7.0"},
-    {"name": "websocket-client", "sha256": "e1a673830a9c7bfa47b1cd3d5e4178f4c9651d80a4eab02c9c23a1c3ec6250ce", "version": "1.9.2"},
-    {"name": "wsproto", "sha256": "61eea322cdf56e8cc904bd3ad7573359a242ba65688716b0710a5eb12beab584", "version": "1.3.2"}
+    {
+      "name": "attrs",
+      "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+      "version": "26.1.0"
+    },
+    {
+      "name": "beautifulsoup4",
+      "sha256": "d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9",
+      "version": "4.15.0"
+    },
+    {
+      "name": "certifi",
+      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+      "version": "2026.7.22"
+    },
+    {
+      "name": "charset-normalizer",
+      "sha256": "ce571ab16d890d23b5c278547ba694193a45011ff86a9162a71307ed9f86759a",
+      "version": "3.4.3"
+    },
+    {
+      "name": "h11",
+      "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+      "version": "0.16.0"
+    },
+    {
+      "name": "idna",
+      "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4",
+      "version": "3.19"
+    },
+    {
+      "name": "outcome",
+      "sha256": "e771c5ce06d1415e356078d3bdd68523f284b4ce5419828922b6871e65eda82b",
+      "version": "1.3.0.post0"
+    },
+    {
+      "name": "pysocks",
+      "sha256": "2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5",
+      "version": "1.7.1"
+    },
+    {
+      "name": "requests",
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+      "version": "2.34.2"
+    },
+    {
+      "name": "selenium",
+      "sha256": "0d1de9ec6977aa2d5f766d923d5076fdffa91681a8d4ffc9e3381a36839a20f2",
+      "version": "4.49.0"
+    },
+    {
+      "name": "sniffio",
+      "sha256": "2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2",
+      "version": "1.3.1"
+    },
+    {
+      "name": "sortedcontainers",
+      "sha256": "a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0",
+      "version": "2.4.0"
+    },
+    {
+      "name": "soupsieve",
+      "sha256": "8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823",
+      "version": "2.9.2"
+    },
+    {
+      "name": "trio",
+      "sha256": "6c7c9f49917694dcdcd5f67abd168df5599eca480d61f29854d17a61a75c2f05",
+      "version": "0.34.0"
+    },
+    {
+      "name": "trio-websocket",
+      "sha256": "df605665f1db533f4a386c94525870851096a223adcb97f72a07e8b4beba45b6",
+      "version": "0.12.2"
+    },
+    {
+      "name": "typing-extensions",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "version": "4.16.0"
+    },
+    {
+      "name": "urllib3",
+      "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897",
+      "version": "2.7.0"
+    },
+    {
+      "name": "websocket-client",
+      "sha256": "e1a673830a9c7bfa47b1cd3d5e4178f4c9651d80a4eab02c9c23a1c3ec6250ce",
+      "version": "1.9.2"
+    },
+    {
+      "name": "wsproto",
+      "sha256": "61eea322cdf56e8cc904bd3ad7573359a242ba65688716b0710a5eb12beab584",
+      "version": "1.3.2"
+    }
   ],
   "results": {
     "attrs": [],
