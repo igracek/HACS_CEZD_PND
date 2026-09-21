@@ -122,6 +122,12 @@ Při prvotní instalaci integrace automaticky stáhne naměřená data za předc
 
 *Poznámka:* Data se v Energy Dashboardu zobrazují zpětně v přesných hodinových UTC intervalech odpovídajících reálnému času spotřeby/dodávky za předchozí dny, aniž by docházelo ke zkreslení aktuálního dne či kolizím s lokálními podružnými měřidly.
 
+Senzor **Intervalová spotřeba** nezobrazuje poslední samostatný 15minutový
+interval. Jde o diskrétní součet všech 15minutových záznamů načtených
+při poslední synchronizaci. Při běžném denním načtení proto zpravidla odpovídá
+hodnotě senzoru **Včerejší spotřeba**. Časový průběh jednotlivých intervalů je
+uložen v externích dlouhodobých statistikách uvedených výše.
+
 ---
 
 ## 🏷️ Přehled poskytovaných entit
@@ -132,8 +138,8 @@ Všechny vytvořené entity jsou registrovány pod zařízením **ČEZ Elektrom�
 | :--- | :--- | :--- |
 | `sensor.cez_pnd_<ean>_yesterday_consumption` | Senzor | Celková včerejší spotřeba (kWh, diskrétní stav) |
 | `sensor.cez_pnd_<ean>_yesterday_production` | Senzor | Celková včerejší výroba / dodávka do sítě (kWh, diskrétní stav) |
-| `sensor.cez_pnd_<ean>_interval_consumption` | Senzor | Poslední naměřená 15min spotřeba (kWh, diskrétní stav) |
-| `sensor.cez_pnd_<ean>_interval_production` | Senzor | Poslední naměřená 15min výroba (kWh, diskrétní stav) |
+| `sensor.cez_pnd_<ean>_interval_consumption` | Senzor | Součet 15minutových záznamů spotřeby z posledního načteného období (kWh, diskrétní stav) |
+| `sensor.cez_pnd_<ean>_interval_production` | Senzor | Součet 15minutových záznamů výroby z posledního načteného období (kWh, diskrétní stav) |
 | `sensor.cez_pnd_<ean>_production_ratio` | Senzor | Poměr pokrytí spotřeby výrobou (%) |
 | `sensor.cez_pnd_<ean>_app_version` | Senzor | Verze integrace a portálu PND |
 | `sensor.cez_pnd_<ean>_sync_duration` | Senzor | Doba trvání poslední synchronizace (s) |
