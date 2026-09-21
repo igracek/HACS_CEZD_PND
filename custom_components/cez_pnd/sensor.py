@@ -64,6 +64,14 @@ PND_SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
     ),
+    SensorEntityDescription(
+        key="billing_consumption",
+        name="Spotřeba od odečtu",
+        native_unit_of_measurement="kWh",
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL,
+        icon="mdi:counter",
+    ),
 )
 
 
@@ -112,11 +120,14 @@ class CezPndSensor(CoordinatorEntity[CezPndCoordinator], SensorEntity):
     @property
     def native_value(self) -> Any:
         """Return native sensor value."""
+        key = self.entity_description.key
+
+        if key == "billing_consumption":
+            return self.coordinator.billing_consumption
+
         res: Optional[SyncResult] = self.coordinator.last_sync_result
         if not res:
             return None
-
-        key = self.entity_description.key
 
         if key == "yesterday_consumption":
             if res.daily_summary:
@@ -170,12 +181,23 @@ class CezPndSensor(CoordinatorEntity[CezPndCoordinator], SensorEntity):
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
         """Return additional state attributes."""
+        key = self.entity_description.key
+        attrs: Dict[str, Any] = {}
+
+        if key == "billing_consumption":
+            if self.coordinator.billing_start_date:
+                attrs["billing_start_date"] = self.coordinator.billing_start_date
+            if self.coordinator.billing_days is not None:
+                attrs["billing_days"] = self.coordinator.billing_days
+            if self.coordinator.billing_consumption_vt is not None:
+                attrs["consumption_vt_kwh"] = self.coordinator.billing_consumption_vt
+            if self.coordinator.billing_consumption_nt is not None:
+                attrs["consumption_nt_kwh"] = self.coordinator.billing_consumption_nt
+            return attrs
+
         res: Optional[SyncResult] = self.coordinator.last_sync_result
         if not res:
             return {}
-
-        key = self.entity_description.key
-        attrs: Dict[str, Any] = {}
 
         if key in ("yesterday_consumption", "yesterday_production"):
             if res.daily_summary and res.daily_summary.date:

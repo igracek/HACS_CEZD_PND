@@ -114,6 +114,30 @@ class PndStatisticsManager:
                 f"Chyba při dotazu na baseline statistiky pro {statistic_id}: {type(err).__name__}"
             ) from err
 
+    async def async_get_consumption_since(
+        self,
+        start_date: datetime,
+    ) -> Dict[str, float]:
+        """Fetch consumption in kWh since start_date (e.g. billing period start) from Recorder."""
+        stat_types = [
+            STATISTIC_CONSUMPTION,
+            STATISTIC_CONSUMPTION_VT,
+            STATISTIC_CONSUMPTION_NT,
+            STATISTIC_PRODUCTION,
+        ]
+        results: Dict[str, float] = {}
+        now = datetime.now(timezone.utc)
+        for st in stat_types:
+            stat_id = self._get_statistic_id(st)
+            try:
+                latest_sum = await self._async_get_baseline_sum(stat_id, now + timedelta(days=1))
+                base_sum = await self._async_get_baseline_sum(stat_id, start_date)
+                results[st] = round(max(0.0, latest_sum - base_sum), 4)
+            except Exception as err:
+                _LOGGER.debug("Could not query consumption since %s for %s: %s", start_date, stat_id, err)
+                results[st] = 0.0
+        return results
+
     async def _async_get_existing_statistics(
         self, statistic_id: str, start_time: datetime, end_time: Optional[datetime] = None
     ) -> List[Any]:

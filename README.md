@@ -18,6 +18,7 @@ Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8
 - **Robustní podpora pro čistě odběrná místa i FVE:** Plná tolerance pro odběrná místa bez fotovoltaiky (výroba se automaticky nastaví na 0.0 kWh bez chybových stavů synchronizace).
 - **Přepočet výkonu na energii a filtrace budoucích dat:** Automatická detekce a přepočet středního výkonu v `[kW]` na energii v `kWh` (faktor $0.25\,\text{h}$ pro 15min intervaly), validace profilů (+A vs -A) a filtrace nenaměřených budoucích dnů (`"neznámá hodnota"`).
 - **Automatické rozlišení VT a NT (Vysoký / Nízký tarif):** Možnost napojení na libovolnou boolean entitu v HA (např. spínání HDO) – integrace zpětně rozdělí spotřebu podle stavu entity v daných intervalech (s bezpečným fallbackem na VT).
+- **Spotřeba od posledního odečtu:** Volitelné datum posledního ročního nebo fakturačního odečtu vytvoří průběžný senzor spotřeby od tohoto dne, včetně samostatných atributů VT a NT.
 - **Konfigurace přes UI (Config Flow, Options Flow & Reauth):** Žádné ruční úpravy YAML souborů. Možnost volby provozního režimu (HTTP / Prohlížeč), správy více odběrných míst (EAN/ELM), bezpečné rotace hesel bez prefillu a ochrana neměnnosti EAN.
 - **Plná podpora ČEZ Single Sign-On:** Podpora SSO domén ČEZ (`pnd.cezdistribuce.cz`, `mepas.cez.cz`, `dip.cezdistribuce.cz`) s přísnou kontrolou originu.
 - **Robustní diagnostický a debugovací subsystém:** Integrovaná nativní platforma diagnostiky Home Assistantu (`diagnostics.py`), opt-in ukládání sanitizovaných DOM HTML dumpů při chybách se striktní anonymizací (redaction) citlivých údajů a auto-pruningem.
@@ -96,6 +97,7 @@ Integraci lze přidat do HACS jako vlastní repozitář:
    - **EAN:** 18místný číselný kód odběrného místa (např. `859182400123456789`).
    - **Číslo elektroměru (ELM):** Číslo zobrazené v portálu ČEZ PND (výběr ze seznamu nebo zadání).
    - **Volitelná VT/NT entita:** Např. `binary_sensor.hdo_tarif` (ON = VT, OFF = NT). Pokud není zadána, vše se počítá jako VT.
+   - **Počáteční datum odečtu:** Volitelné datum posledního ročního nebo fakturačního odečtu. Lze je později změnit v možnostech integrace.
    - **Čas denního stahování:** Výchozí `06:00`.
    - **Debug režim / Ladicí složka:** Volitelná aktivace rozšířeného debugování (ve výchozím stavu vypnuto) a volba cílové složky (`/config/cez_pnd_debug/`).
 
@@ -106,6 +108,23 @@ Při prvotní instalaci integrace automaticky stáhne naměřená data za předc
 3. Vyplňte pole **Období** (`date_range`) ve formátu `DD.MM.YYYY - DD.MM.YYYY` (např. `01.07.2026 - 31.08.2026`, bezpečnostní limit je max. 60 dní na jedno volání).
 4. Pokud máte nakonfigurováno více odběrných míst, zadejte i cílový **EAN kód**.
 5. Klikněte na **Provést akci**. Integrace z portálu ČEZ PND stáhne 15minutové profily spotřeby (+A) i výroby (-A), provede rozdělení VT/NT a automaticky naplní dlouhodobé statistiky v Energy Dashboardu se správným přepočtem kumulativních sum.
+
+---
+
+## 🧾 Spotřeba od posledního odečtu
+
+V možnostech integrace nastavte **Počáteční datum odečtu** na den posledního
+ročního nebo fakturačního odečtu. Integrace poté vytvoří senzor **Spotřeba od
+odečtu**, který průběžně sčítá spotřebu od zvoleného data do posledních dat
+dostupných v dlouhodobých statistikách Home Assistantu.
+
+Senzor se aktualizuje po spuštění integrace a po každém úspěšném importu dat.
+Jeho atributy obsahují počáteční datum, počet uplynulých dní a samostatné
+součty VT a NT. Pokud počáteční datum není nastaveno nebo pro zvolené období
+nejsou k dispozici statistiky, senzor nemá vypočtenou hodnotu, případně
+zobrazuje pouze dostupnou část období. Nejde o stav fyzického elektroměru ani
+o fakturační údaj dodavatele; hodnota je odvozena z dat již importovaných do
+Home Assistantu.
 
 ---
 
@@ -141,6 +160,7 @@ Všechny vytvořené entity jsou registrovány pod zařízením **ČEZ Elektrom�
 | `sensor.cez_pnd_<ean>_interval_consumption` | Senzor | Součet 15minutových záznamů spotřeby z posledního načteného období (kWh, diskrétní stav) |
 | `sensor.cez_pnd_<ean>_interval_production` | Senzor | Součet 15minutových záznamů výroby z posledního načteného období (kWh, diskrétní stav) |
 | `sensor.cez_pnd_<ean>_production_ratio` | Senzor | Poměr pokrytí spotřeby výrobou (%) |
+| `sensor.cez_elektromer_<ean>_spotreba_od_odectu` | Senzor | Spotřeba od nastaveného data odečtu; atributy obsahují VT, NT a počet dní |
 | `sensor.cez_pnd_<ean>_app_version` | Senzor | Verze integrace a portálu PND |
 | `sensor.cez_pnd_<ean>_sync_duration` | Senzor | Doba trvání poslední synchronizace (s) |
 | `binary_sensor.cez_pnd_<ean>_running` | Binární senzor | Indikuje právě probíhající stahování dat |

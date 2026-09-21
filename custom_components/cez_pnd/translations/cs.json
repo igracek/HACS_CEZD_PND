@@ -11,6 +11,7 @@
           "elm": "Číslo elektroměru (ELM)",
           "client_mode": "Režim klienta (přímý HTTP / prohlížeč)",
           "tariff_entity": "Volitelná entita stavu HDO / VT-NT (např. binary_sensor.hdo)",
+          "billing_start_date": "Volitelné počáteční datum odečtu (RRRR-MM-DD)",
           "scan_time": "Čas denního stahování (HH:MM)"
         }
       },
@@ -39,6 +40,7 @@
       "invalid_auth": "Neplatné uživatelské jméno nebo heslo.",
       "invalid_ean": "Neplatný formát EAN kódu (musí obsahovat přesně 18 číslic).",
       "invalid_elm": "Neplatný formát čísla ELM (povoleny alfanumerické znaky, pomlčka a podtržítko, max 30 znaků).",
+      "invalid_billing_start_date": "Neplatné počáteční datum odečtu.",
       "invalid_scan_time": "Neplatný formát času skenování (očekává se HH:MM).",
       "credentials_too_long": "Nové heslo může mít nejvýše 256 znaků.",
       "invalid_debug_path": "Zadaná ladicí cesta je neplatná nebo leží mimo povolený kořen Home Assistant.",
@@ -66,6 +68,7 @@
           "password": "Nové heslo (ponechte prázdné pro zachování)",
           "client_mode": "Režim klienta (přímý HTTP / prohlížeč)",
           "tariff_entity": "Entita stavu HDO / VT-NT (ON = VT, OFF = NT)",
+          "billing_start_date": "Počáteční datum odečtu (RRRR-MM-DD)",
           "scan_time": "Čas denního stahování (HH:MM)",
           "debug_mode": "Aktivovat ladicí režim (Debug Mode)",
           "debug_dir": "Složka pro ladicí soubory a snímky"
@@ -75,6 +78,7 @@
     "error": {
       "invalid_debug_path": "Zadaná ladicí cesta je neplatná nebo leží mimo povolený kořen Home Assistant.",
       "invalid_debug_dir": "Zadaná ladicí složka je neplatná nebo leží mimo povolený kořen Home Assistant.",
+      "invalid_billing_start_date": "Neplatné počáteční datum odečtu.",
       "invalid_scan_time": "Neplatný formát času skenování (očekává se HH:MM).",
       "invalid_auth": "Neplatné uživatelské jméno nebo heslo.",
       "captcha_detected": "Portál ČEZ PND vyžaduje ověření CAPTCHA.",

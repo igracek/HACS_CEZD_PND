@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import inspect
 import logging
 import os
@@ -33,6 +34,7 @@ from .client import (
 )
 from .http_client import PndHttpClient
 from .const import (
+    CONF_BILLING_START_DATE,
     CONF_BROWSER_HEADLESS,
     CONF_CLIENT_MODE,
     CONF_DEBUG_DIR,
@@ -344,6 +346,9 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Optional(CONF_TARIFF_ENTITY): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "sensor"])
             ),
+            vol.Optional(CONF_BILLING_START_DATE): selector.DateSelector(
+                selector.DateSelectorConfig()
+            ),
             vol.Optional(CONF_SCAN_TIME, default=DEFAULT_SCAN_TIME): cv.string,
         })
 
@@ -546,6 +551,20 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
             elif scan_time and not validate_scan_time(scan_time):
                 errors["base"] = "invalid_scan_time"
 
+            billing_start_val = user_input.get(CONF_BILLING_START_DATE)
+            if billing_start_val and str(billing_start_val).strip():
+                b_str = str(billing_start_val).strip()
+                parsed_b = False
+                for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d"):
+                    try:
+                        datetime.strptime(b_str, fmt)
+                        parsed_b = True
+                        break
+                    except ValueError:
+                        continue
+                if not parsed_b:
+                    errors[CONF_BILLING_START_DATE] = "invalid_billing_start_date"
+
             debug_target = debug_dir_val if debug_dir_val is not None else debug_path_val
             if debug_target is not None and str(debug_target).strip():
                 try:
@@ -622,6 +641,10 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
             ): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "sensor"])
             ),
+            vol.Optional(
+                CONF_BILLING_START_DATE,
+                description={"suggested_value": get_val(CONF_BILLING_START_DATE)},
+            ): selector.DateSelector(selector.DateSelectorConfig()),
             vol.Optional(
                 CONF_SCAN_TIME,
                 default=get_val(CONF_SCAN_TIME, DEFAULT_SCAN_TIME),

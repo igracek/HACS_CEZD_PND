@@ -1,7 +1,7 @@
 {
   "artifacts": {
     "lock_sha256": "e6c0da54a0a461e36676d6b13e12b388400210778cb5747b997ec7eae2a30818",
-    "manifest_sha256": "48614ae0968d780b90e1d51204b0feb0eb2cd6d446dfc60d3bf2792aa0a24851",
+    "manifest_sha256": "b8628b20efbd82e4dfaee8cc62ad96318cdf8baf3b42938be9d2f0c8b6567d10",
     "sbom_sha256": "b5c187a16190b02a9b9486d1ee3a8ba3adb03c1a47c1a2559dcacfdf67a96f35"
   },
   "baseline": {

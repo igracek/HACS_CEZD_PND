@@ -32,6 +32,7 @@ from .client import (
 )
 from .http_client import PndHttpClient
 from .const import (
+    CONF_BILLING_START_DATE,
     CONF_BROWSER_HEADLESS,
     CONF_CLIENT_MODE,
     CONF_DEBUG_DIR,
@@ -43,6 +44,9 @@ from .const import (
     CONF_SCAN_TIME,
     CONF_TARIFF_ENTITY,
     CONF_USERNAME,
+    STATISTIC_CONSUMPTION,
+    STATISTIC_CONSUMPTION_VT,
+    STATISTIC_CONSUMPTION_NT,
     CLIENT_MODE_BROWSER,
     CLIENT_MODE_HTTP,
     DEFAULT_CLIENT_MODE,
@@ -503,6 +507,60 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         self._unsub_retry: Optional[Callable[[], None]] = None
         self._retry_scheduled: bool = False
 
+        self.billing_start_date: Optional[str] = None
+        self.billing_consumption: Optional[float] = None
+        self.billing_consumption_vt: Optional[float] = None
+        self.billing_consumption_nt: Optional[float] = None
+        self.billing_days: Optional[int] = None
+
+    async def _async_calculate_billing_consumption(self) -> None:
+        """Calculate energy consumption since billing_start_date if configured."""
+        from datetime import timezone
+        options = self.entry.options if hasattr(self.entry, "options") else {}
+        data = self.entry.data if hasattr(self.entry, "data") else {}
+        raw_start = options.get(CONF_BILLING_START_DATE, data.get(CONF_BILLING_START_DATE))
+        if not raw_start or not str(raw_start).strip():
+            self.billing_start_date = None
+            self.billing_consumption = None
+            self.billing_consumption_vt = None
+            self.billing_consumption_nt = None
+            self.billing_days = None
+            return
+
+        start_str = str(raw_start).strip()
+        start_dt: Optional[datetime] = None
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d"):
+            try:
+                start_dt = datetime.strptime(start_str, fmt).replace(tzinfo=timezone.utc)
+                break
+            except ValueError:
+                continue
+
+        if start_dt is None:
+            _LOGGER.warning("Invalid billing_start_date format '%s' (expected YYYY-MM-DD)", start_str)
+            return
+
+        self.billing_start_date = start_dt.strftime("%Y-%m-%d")
+        now_utc = datetime.now(timezone.utc)
+        self.billing_days = max(0, (now_utc.date() - start_dt.date()).days)
+
+        try:
+            res = await self.stats_manager.async_get_consumption_since(start_dt)
+            self.billing_consumption = res.get(STATISTIC_CONSUMPTION, 0.0)
+            self.billing_consumption_vt = res.get(STATISTIC_CONSUMPTION_VT, 0.0)
+            self.billing_consumption_nt = res.get(STATISTIC_CONSUMPTION_NT, 0.0)
+            _LOGGER.debug(
+                "Calculated billing period consumption since %s: %s kWh (VT: %s, NT: %s, %d days)",
+                self.billing_start_date,
+                self.billing_consumption,
+                self.billing_consumption_vt,
+                self.billing_consumption_nt,
+                self.billing_days,
+            )
+            self.async_update_listeners()
+        except Exception as err:
+            _LOGGER.error("Failed to calculate billing period consumption: %s", err)
+
     @property
     def _identity_notification_id(self) -> str:
         """Stable notification id that contains no customer identifier."""
@@ -594,6 +652,16 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         self._unsub_schedule = async_track_time_change(
             self.hass, _scheduled_tick, hour=hour, minute=minute, second=0
         )
+
+        # Compute billing consumption on startup/setup if not yet calculated
+        if self.billing_consumption is None and hasattr(self.hass, "async_create_task"):
+            coro = self._async_calculate_billing_consumption()
+            try:
+                task = self.hass.async_create_task(coro)
+                if not isinstance(task, asyncio.Task):
+                    coro.close()
+            except Exception:
+                coro.close()
 
     def cancel_schedule(self) -> None:
         """Cancel scheduled time tracker and any pending retry callbacks (SEC04-05)."""
@@ -692,6 +760,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
 
                 _LOGGER.debug("Importing %d intervals to HA long-term statistics", len(parsed_data.intervals))
                 await self.stats_manager.async_import(parsed_data)
+                await self._async_calculate_billing_consumption()
 
                 duration = round(time.time() - start_time, 2)
                 self.last_sync_time = datetime.now()

@@ -11,6 +11,7 @@
           "elm": "Electricity Meter Number (ELM)",
           "client_mode": "Client Mode (Direct HTTP / Browser)",
           "tariff_entity": "Optional VT/NT Tariff boolean entity (e.g. binary_sensor.hdo)",
+          "billing_start_date": "Optional Billing Period Start Date (YYYY-MM-DD)",
           "scan_time": "Daily scan time (HH:MM)"
         }
       },
@@ -40,6 +41,7 @@
       "invalid_auth": "Invalid username or password.",
       "invalid_ean": "Invalid EAN code format (must contain exactly 18 digits).",
       "invalid_elm": "Invalid ELM number format (alphanumeric, dash, and underscore allowed, max 30 characters).",
+      "invalid_billing_start_date": "Invalid billing period start date.",
       "invalid_scan_time": "Invalid scan time format (expected HH:MM).",
       "credentials_too_long": "The new password must be at most 256 characters.",
       "invalid_debug_path": "The specified debug path is invalid or outside the allowed Home Assistant root directory.",
@@ -67,6 +69,7 @@
           "password": "New Password (leave empty to keep current)",
           "client_mode": "Client Mode (Direct HTTP / Browser)",
           "tariff_entity": "VT/NT Tariff Entity (ON = High, OFF = Low)",
+          "billing_start_date": "Billing Period Start Date (YYYY-MM-DD)",
           "scan_time": "Daily scan time (HH:MM)",
           "debug_mode": "Enable Debug Mode",
           "debug_dir": "Directory for debug dumps and screenshots"
@@ -76,6 +79,7 @@
     "error": {
       "invalid_debug_path": "The specified debug path is invalid or outside the allowed Home Assistant root directory.",
       "invalid_debug_dir": "The specified debug directory is invalid or outside the allowed Home Assistant root directory.",
+      "invalid_billing_start_date": "Invalid billing period start date.",
       "invalid_scan_time": "Invalid scan time format (expected HH:MM).",
       "invalid_auth": "Invalid username or password.",
       "captcha_detected": "CEZ PND portal requires CAPTCHA verification.",

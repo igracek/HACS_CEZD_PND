@@ -16,6 +16,7 @@ CONF_DEBUG_MODE: Final = "debug_mode"
 CONF_DEBUG_DIR: Final = "debug_dir"
 CONF_ENABLE_NETWORK_CAPTURE: Final = "enable_network_capture"
 CONF_CLIENT_MODE: Final = "client_mode"
+CONF_BILLING_START_DATE: Final = "billing_start_date"
 
 # Client mode options
 CLIENT_MODE_HTTP: Final = "http"
