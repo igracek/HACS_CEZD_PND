@@ -35,12 +35,15 @@ from .const import (
     CONF_BILLING_START_DATE,
     CONF_BROWSER_HEADLESS,
     CONF_CLIENT_MODE,
+    CONF_COST_TRACKING,
     CONF_DEBUG_DIR,
     CONF_DEBUG_MODE,
     CONF_EAN,
     CONF_ELM,
     CONF_ENABLE_NETWORK_CAPTURE,
     CONF_PASSWORD,
+    CONF_PRICE_CURRENCY,
+    CONF_PRICE_SCHEDULE,
     CONF_SCAN_TIME,
     CONF_TARIFF_ENTITY,
     CONF_USERNAME,
@@ -497,7 +500,32 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         self.scraper = self._get_client()
         self.parser = PndCsvParser()
         self.tariff_evaluator = TariffEvaluator(hass, self.tariff_entity)
-        self.stats_manager = PndStatisticsManager(hass, self.ean)
+        price_schedule = (
+            options.get(CONF_PRICE_SCHEDULE, [])
+            if options.get(CONF_COST_TRACKING, False)
+            else []
+        )
+        stored_currency = str(options.get(CONF_PRICE_CURRENCY, "")).upper()
+        current_currency = str(getattr(hass.config, "currency", "")).upper()
+        currency_notification_id = f"cez_pnd_price_currency_{entry.entry_id}"
+        if price_schedule and stored_currency != current_currency:
+            _LOGGER.error(
+                "Cost calculation disabled: stored price currency differs from Home Assistant currency"
+            )
+            persistent_notification.async_create(
+                hass,
+                "Výpočet nákladů ČEZ PND byl zastaven, protože se měna cenového "
+                "kalendáře liší od aktuální měny Home Assistantu. Otevřete možnosti "
+                "integrace a zkontrolujte cenový kalendář.",
+                title="ČEZ PND: neshoda měny",
+                notification_id=currency_notification_id,
+            )
+            price_schedule = []
+        else:
+            persistent_notification.async_dismiss(hass, currency_notification_id)
+        self.stats_manager = PndStatisticsManager(
+            hass, self.ean, price_schedule=price_schedule
+        )
 
         self.is_running: bool = False
         self.last_sync_result: Optional[SyncResult] = None

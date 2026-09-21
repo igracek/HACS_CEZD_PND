@@ -71,7 +71,11 @@
           "billing_start_date": "Počáteční datum odečtu (RRRR-MM-DD)",
           "scan_time": "Čas denního stahování (HH:MM)",
           "debug_mode": "Aktivovat ladicí režim (Debug Mode)",
-          "debug_dir": "Složka pro ladicí soubory a snímky"
+          "debug_dir": "Složka pro ladicí soubory a snímky",
+          "cost_tracking": "Počítat náklady pro VT/NT",
+          "price_vt": "Variabilní cena ve VT (včetně DPH)",
+          "price_nt": "Variabilní cena v NT (včetně DPH)",
+          "price_valid_from": "Ceny platí od"
         }
       }
     },
@@ -87,7 +91,9 @@
       "elm_not_found": "Zadané číslo ELM nebylo nalezeno v nabídce portálu.",
       "elm_unavailable": "Účet PND neposkytuje identifikátor ELM v podporovaném poli.",
       "service_unavailable": "Portál ČEZ PND prochází údržbou / odstávkou.",
-      "cannot_connect": "Nepodařilo se navázat spojení s portálem ČEZ PND."
+      "cannot_connect": "Nepodařilo se navázat spojení s portálem ČEZ PND.",
+      "invalid_price_settings": "Zadejte platné ceny VT a NT a datum jejich platnosti.",
+      "price_currency_mismatch": "Měna Home Assistantu se liší od uloženého cenového kalendáře. Před změnou měny je nutné vyřešit existující náklady."
     }
   },
   "services": {
@@ -113,6 +119,16 @@
           "name": "EAN kód",
           "description": "Výběr konfigurace při více odběrných místech."
         }
+      }
+    },
+    "recalculate_costs": {
+      "name": "Přepočítat náklady VT/NT",
+      "description": "Vytvoří nebo opraví nákladové statistiky z uložené spotřeby a cenového kalendáře. Ve výchozím stavu pouze náhled. Jen pro správce.",
+      "fields": {
+        "ean": {"name": "EAN kód", "description": "Výběr konfigurace při více odběrných místech."},
+        "start_date": {"name": "Datum od", "description": "První místní kalendářní den přepočtu."},
+        "end_date": {"name": "Datum do", "description": "Poslední místní kalendářní den přepočtu."},
+        "dry_run": {"name": "Pouze náhled", "description": "Vrátí počty nalezených hodin bez zápisu statistik."}
       }
     }
   },

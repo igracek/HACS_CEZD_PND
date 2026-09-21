@@ -1,7 +1,7 @@
 """Services for CEZ Distribuce PND integration."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 import logging
 import re
 from typing import Any, Dict
@@ -15,9 +15,13 @@ from homeassistant.helpers.service import async_register_admin_service
 
 from .const import (
     ATTR_DATE_RANGE,
+    ATTR_DRY_RUN,
     ATTR_EAN,
+    ATTR_END_DATE,
+    ATTR_START_DATE,
     DOMAIN,
     SERVICE_FETCH_DATA,
+    SERVICE_RECALCULATE_COSTS,
     SERVICE_TEST_EXPORT_SCENARIOS,
 )
 from .coordinator import CezPndCoordinator
@@ -27,6 +31,13 @@ _LOGGER = logging.getLogger(__name__)
 FETCH_DATA_SCHEMA = vol.Schema({
     vol.Optional(ATTR_EAN): cv.string,
     vol.Optional(ATTR_DATE_RANGE): cv.string,
+})
+
+RECALCULATE_COSTS_SCHEMA = vol.Schema({
+    vol.Optional(ATTR_EAN): cv.string,
+    vol.Required(ATTR_START_DATE): cv.date,
+    vol.Required(ATTR_END_DATE): cv.date,
+    vol.Optional(ATTR_DRY_RUN, default=True): cv.boolean,
 })
 
 
@@ -123,6 +134,29 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         _LOGGER.info("Testing PND export scenarios for EAN %s", coordinator.masked_ean)
         return await coordinator.async_test_export_scenarios()
 
+    async def handle_recalculate_costs(call: ServiceCall) -> Dict[str, Any]:
+        """Preview or recalculate historical costs from Recorder statistics."""
+        coordinator = _get_coordinator(hass, call)
+        start_date: date = call.data[ATTR_START_DATE]
+        end_date: date = call.data[ATTR_END_DATE]
+        if end_date < start_date:
+            raise ServiceValidationError("Datum do nesmí být před datem od.")
+        if (end_date - start_date).days > 3660:
+            raise ServiceValidationError("Rozsah přepočtu nesmí překročit 10 let.")
+        try:
+            import homeassistant.util.dt as dt_util
+
+            local_tz = dt_util.DEFAULT_TIME_ZONE
+            start_time = datetime.combine(start_date, time.min, local_tz).astimezone(timezone.utc)
+            end_time = datetime.combine(
+                end_date + timedelta(days=1), time.min, local_tz
+            ).astimezone(timezone.utc)
+            return await coordinator.stats_manager.async_recalculate_costs(
+                start_time, end_time, dry_run=call.data[ATTR_DRY_RUN]
+            )
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
     if not hass.services.has_service(DOMAIN, SERVICE_FETCH_DATA):
         async_register_admin_service(
             hass,
@@ -138,6 +172,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             SERVICE_TEST_EXPORT_SCENARIOS,
             handle_test_export_scenarios,
             schema=vol.Schema({vol.Optional(ATTR_EAN): cv.string}),
+            supports_response=SupportsResponse.ONLY,
+        )
+    if not hass.services.has_service(DOMAIN, SERVICE_RECALCULATE_COSTS):
+        async_register_admin_service(
+            hass,
+            DOMAIN,
+            SERVICE_RECALCULATE_COSTS,
+            handle_recalculate_costs,
+            schema=RECALCULATE_COSTS_SCHEMA,
             supports_response=SupportsResponse.ONLY,
         )
 
@@ -158,3 +201,5 @@ async def async_unload_services(hass: HomeAssistant) -> None:
             hass.services.async_remove(DOMAIN, SERVICE_FETCH_DATA)
         if hass.services.has_service(DOMAIN, SERVICE_TEST_EXPORT_SCENARIOS):
             hass.services.async_remove(DOMAIN, SERVICE_TEST_EXPORT_SCENARIOS)
+        if hass.services.has_service(DOMAIN, SERVICE_RECALCULATE_COSTS):
+            hass.services.async_remove(DOMAIN, SERVICE_RECALCULATE_COSTS)

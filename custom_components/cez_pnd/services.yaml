@@ -28,3 +28,31 @@ test_export_scenarios:
       example: "859182400123456789"
       selector:
         text:
+
+recalculate_costs:
+  name: Přepočítat náklady VT/NT
+  description: Z uložených statistik spotřeby vytvoří nebo opraví náklady podle cenového kalendáře. Ve výchozím stavu provede pouze bezpečný náhled. Pouze pro správce.
+  fields:
+    ean:
+      name: EAN kód
+      description: Výběr konfigurace při více odběrných místech.
+      required: false
+      selector:
+        text:
+    start_date:
+      name: Datum od
+      required: true
+      selector:
+        date:
+    end_date:
+      name: Datum do
+      required: true
+      selector:
+        date:
+    dry_run:
+      name: Pouze náhled
+      description: Pokud je zapnuto, nic se nezapíše a akce vrátí počet nalezených hodin.
+      required: true
+      default: true
+      selector:
+        boolean:

@@ -17,6 +17,12 @@ CONF_DEBUG_DIR: Final = "debug_dir"
 CONF_ENABLE_NETWORK_CAPTURE: Final = "enable_network_capture"
 CONF_CLIENT_MODE: Final = "client_mode"
 CONF_BILLING_START_DATE: Final = "billing_start_date"
+CONF_COST_TRACKING: Final = "cost_tracking"
+CONF_PRICE_VT: Final = "price_vt"
+CONF_PRICE_NT: Final = "price_nt"
+CONF_PRICE_VALID_FROM: Final = "price_valid_from"
+CONF_PRICE_SCHEDULE: Final = "price_schedule"
+CONF_PRICE_CURRENCY: Final = "price_currency"
 
 # Client mode options
 CLIENT_MODE_HTTP: Final = "http"
@@ -140,12 +146,18 @@ STATISTIC_CONSUMPTION: Final = "consumption"
 STATISTIC_CONSUMPTION_VT: Final = "consumption_vt"
 STATISTIC_CONSUMPTION_NT: Final = "consumption_nt"
 STATISTIC_PRODUCTION: Final = "production"
+STATISTIC_COST_VT: Final = "cost_vt"
+STATISTIC_COST_NT: Final = "cost_nt"
 
 # Services
 SERVICE_FETCH_DATA: Final = "fetch_data"
 SERVICE_TEST_EXPORT_SCENARIOS: Final = "test_export_scenarios"
+SERVICE_RECALCULATE_COSTS: Final = "recalculate_costs"
 ATTR_DATE_RANGE: Final = "date_range"
 ATTR_EAN: Final = "ean"
+ATTR_START_DATE: Final = "start_date"
+ATTR_END_DATE: Final = "end_date"
+ATTR_DRY_RUN: Final = "dry_run"
 
 
 def mask_ean(ean: str) -> str:

@@ -1,6 +1,7 @@
 """Statistics manager for importing CEZ PND data into Home Assistant Recorder."""
 import asyncio
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -25,11 +26,14 @@ from .const import (
     STATISTIC_CONSUMPTION,
     STATISTIC_CONSUMPTION_VT,
     STATISTIC_CONSUMPTION_NT,
+    STATISTIC_COST_NT,
+    STATISTIC_COST_VT,
     STATISTIC_PREFIX,
     STATISTIC_PRODUCTION,
     mask_ean,
 )
 from .models import IntervalRecord, ParsedPndData
+from .pricing import price_period_for
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,10 +65,17 @@ def _normalize_datetime(dt_val: Any) -> datetime:
 class PndStatisticsManager:
     """Manages long-term external statistics for CEZ PND in HA Recorder."""
 
-    def __init__(self, hass: Any, ean: str) -> None:
+    def __init__(
+        self,
+        hass: Any,
+        ean: str,
+        *,
+        price_schedule: Optional[List[Dict[str, str]]] = None,
+    ) -> None:
         """Initialize statistics manager for a given EAN."""
         self.hass = hass
         self.ean = ean
+        self.price_schedule = list(price_schedule or [])
 
     def _get_statistic_id(self, stat_type: str) -> str:
         """Return the formatted statistic ID."""
@@ -222,6 +233,169 @@ class PndStatisticsManager:
                 stat_id, stat_name, intervals, delta_fn, validity_fn=validity_fn
             )
 
+        if self.price_schedule:
+            uncovered = [
+                record
+                for record in intervals
+                if record.is_valid_consumption and self._price_period(record) is None
+            ]
+            if uncovered:
+                first_missing = min(record.start_time for record in uncovered)
+                _LOGGER.warning(
+                    "Cost statistics skipped for %d intervals without a configured price; first missing interval=%s EAN=%s",
+                    len(uncovered),
+                    first_missing.isoformat(),
+                    masked,
+                )
+            cost_configs = [
+                (
+                    STATISTIC_COST_VT,
+                    f"ČEZ PND Náklady VT ({masked})",
+                    True,
+                ),
+                (
+                    STATISTIC_COST_NT,
+                    f"ČEZ PND Náklady NT ({masked})",
+                    False,
+                ),
+            ]
+            for stat_key, stat_name, is_vt in cost_configs:
+                stat_id = self._get_statistic_id(stat_key)
+                await self._async_import_single_statistic(
+                    stat_id,
+                    stat_name,
+                    intervals,
+                    lambda record, tariff=is_vt: self._interval_cost(record, tariff),
+                    validity_fn=lambda record: (
+                        record.is_valid_consumption
+                        and self._price_period(record) is not None
+                    ),
+                    unit_class=None,
+                    unit_of_measurement=None,
+                    value_label=self._price_currency(),
+                )
+
+    def _interval_cost(self, record: IntervalRecord, is_vt: bool) -> float:
+        """Calculate interval cost using the price effective at its timestamp."""
+        if record.is_vt != is_vt:
+            return 0.0
+        period = self._price_period(record)
+        if period is None:
+            return 0.0
+        price_key = "price_vt" if is_vt else "price_nt"
+        return float(Decimal(str(record.consumption_kwh)) * Decimal(period[price_key]))
+
+    def _price_period(self, record: IntervalRecord) -> Optional[Dict[str, str]]:
+        """Resolve a period by the interval's local calendar date."""
+        timestamp = record.start_time
+        if timestamp.tzinfo is not None:
+            try:
+                import homeassistant.util.dt as dt_util
+
+                timestamp = dt_util.as_local(timestamp)
+            except (ImportError, AttributeError):
+                pass
+        return price_period_for(self.price_schedule, timestamp)
+
+    def _price_currency(self) -> str:
+        """Return the single configured schedule currency for safe logging."""
+        if not self.price_schedule:
+            return "currency units"
+        return self.price_schedule[0].get("currency", "currency units")
+
+    async def async_recalculate_costs(
+        self, start_time: datetime, end_time: datetime, *, dry_run: bool = False
+    ) -> Dict[str, Any]:
+        """Recalculate cost statistics from existing VT/NT energy statistics."""
+        if not self.price_schedule:
+            raise ValueError("Cost tracking and a price schedule must be configured")
+        if end_time <= start_time:
+            raise ValueError("End time must be after start time")
+
+        streams = (
+            (STATISTIC_CONSUMPTION_VT, STATISTIC_COST_VT, True),
+            (STATISTIC_CONSUMPTION_NT, STATISTIC_COST_NT, False),
+        )
+        prepared: list[tuple[str, bool, List[IntervalRecord]]] = []
+        uncovered_hours: list[str] = []
+
+        for energy_key, cost_key, is_vt in streams:
+            energy_id = self._get_statistic_id(energy_key)
+            points = await self._async_get_existing_statistics(
+                energy_id, start_time, end_time
+            )
+            synthetic: List[IntervalRecord] = []
+            previous_sum = await self._async_get_baseline_sum(energy_id, start_time)
+            for point in points:
+                raw_start = point.get("start") if isinstance(point, dict) else getattr(point, "start", None)
+                raw_state = point.get("state") if isinstance(point, dict) else getattr(point, "state", None)
+                raw_sum = point.get("sum") if isinstance(point, dict) else getattr(point, "sum", None)
+                if raw_start is None:
+                    continue
+                hour = _normalize_datetime(raw_start).replace(minute=0, second=0, microsecond=0)
+                if raw_state is None and raw_sum is not None:
+                    raw_state = max(0.0, float(raw_sum) - previous_sum)
+                if raw_sum is not None:
+                    previous_sum = float(raw_sum)
+                if raw_state is None:
+                    continue
+                energy = float(raw_state)
+                if energy < -1e-6:
+                    raise PndStatisticsError(f"Negative source statistic at {hour.isoformat()}")
+                probe = IntervalRecord(
+                    start_time=hour,
+                    end_time=hour + timedelta(minutes=15),
+                    consumption_kwh=max(0.0, energy) / 4,
+                    is_vt=is_vt,
+                )
+                if self._price_period(probe) is None:
+                    uncovered_hours.append(hour.isoformat())
+                    continue
+                for quarter in range(4):
+                    interval_start = hour + timedelta(minutes=15 * quarter)
+                    synthetic.append(
+                        IntervalRecord(
+                            start_time=interval_start,
+                            end_time=interval_start + timedelta(minutes=15),
+                            consumption_kwh=max(0.0, energy) / 4,
+                            is_vt=is_vt,
+                        )
+                    )
+            prepared.append((cost_key, is_vt, synthetic))
+
+        if uncovered_hours:
+            unique_uncovered = sorted(set(uncovered_hours))
+            raise ValueError(
+                "Price schedule does not cover all source statistics; first missing hour: "
+                f"{unique_uncovered[0]}"
+            )
+
+        result: Dict[str, Any] = {
+            "status": "preview" if dry_run else "completed",
+            "currency": self._price_currency(),
+            "hours_vt": len(prepared[0][2]) // 4,
+            "hours_nt": len(prepared[1][2]) // 4,
+        }
+        if dry_run:
+            return result
+
+        masked = mask_ean(self.ean)
+        for cost_key, is_vt, records in prepared:
+            if not records:
+                continue
+            tariff = "VT" if is_vt else "NT"
+            await self._async_import_single_statistic(
+                self._get_statistic_id(cost_key),
+                f"ČEZ PND Náklady {tariff} ({masked})",
+                records,
+                lambda record, target=is_vt: self._interval_cost(record, target),
+                validity_fn=lambda record: record.is_valid_consumption,
+                unit_class=None,
+                unit_of_measurement=None,
+                value_label=self._price_currency(),
+            )
+        return result
+
     async def _async_import_single_statistic(
         self,
         statistic_id: str,
@@ -229,6 +403,9 @@ class PndStatisticsManager:
         intervals: List[IntervalRecord],
         delta_fn: Any,
         validity_fn: Optional[Any] = None,
+        unit_class: Optional[str] = "energy",
+        unit_of_measurement: Optional[str] = UOM_KWH,
+        value_label: str = "kWh",
     ) -> None:
         """Import single statistic stream with deterministic hourly aggregation, baseline sum, merge, and backfill shift."""
         if not intervals:
@@ -406,8 +583,8 @@ class PndStatisticsManager:
                 name=name,
                 source=DOMAIN,
                 statistic_id=statistic_id,
-                unit_class="energy",
-                unit_of_measurement=UOM_KWH,
+                unit_class=unit_class,
+                unit_of_measurement=unit_of_measurement,
             )
 
             async_add_external_statistics(self.hass, metadata, statistic_data_objects)
@@ -417,7 +594,7 @@ class PndStatisticsManager:
             max_str = max_t.strftime("%Y-%m-%d %H:%M") if hasattr(max_t, "strftime") else str(max_t)
 
             _LOGGER.info(
-                "Statistiky %s: importováno %d bodů (%d v dávce, %d posunutých následných), okno %s -> %s, delta: %.4f kWh, base_sum: %.4f kWh -> nová suma: %.4f kWh (posun: %.4f kWh).",
+                "Statistiky %s: importováno %d bodů (%d v dávce, %d posunutých následných), okno %s -> %s, delta: %.4f %s, base_sum: %.4f %s -> nová suma: %.4f %s (posun: %.4f %s).",
                 statistic_id,
                 len(statistic_data_objects),
                 len(stats_payload),
@@ -425,9 +602,13 @@ class PndStatisticsManager:
                 min_str,
                 max_str,
                 batch_delta,
+                value_label,
                 base_sum,
+                value_label,
                 batch_final_sum,
+                value_label,
                 delta_shift,
+                value_label,
             )
 
         except (ImportError, AttributeError) as err:

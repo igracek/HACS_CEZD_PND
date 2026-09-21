@@ -71,7 +71,11 @@
           "billing_start_date": "Billing Period Start Date (YYYY-MM-DD)",
           "scan_time": "Daily scan time (HH:MM)",
           "debug_mode": "Enable Debug Mode",
-          "debug_dir": "Directory for debug dumps and screenshots"
+          "debug_dir": "Directory for debug dumps and screenshots",
+          "cost_tracking": "Calculate VT/NT energy costs",
+          "price_vt": "High-tariff variable price (including VAT)",
+          "price_nt": "Low-tariff variable price (including VAT)",
+          "price_valid_from": "Prices valid from"
         }
       }
     },
@@ -87,7 +91,9 @@
       "elm_not_found": "Specified ELM number was not found in account.",
       "elm_unavailable": "The PND account does not provide an ELM identifier in a supported field.",
       "service_unavailable": "CEZ PND portal is under maintenance.",
-      "cannot_connect": "Failed to connect to CEZ PND portal."
+      "cannot_connect": "Failed to connect to CEZ PND portal.",
+      "invalid_price_settings": "Enter valid VT and NT prices and their effective date.",
+      "price_currency_mismatch": "The Home Assistant currency differs from the stored price schedule. Existing costs must be handled before changing currency."
     }
   },
   "services": {
@@ -113,6 +119,16 @@
           "name": "EAN code",
           "description": "Select the integration entry when multiple measurement points exist."
         }
+      }
+    },
+    "recalculate_costs": {
+      "name": "Recalculate VT/NT costs",
+      "description": "Create or repair cost statistics from stored consumption statistics and the configured price schedule. Preview only by default. Administrator only.",
+      "fields": {
+        "ean": {"name": "EAN code", "description": "Select the integration entry when multiple measurement points exist."},
+        "start_date": {"name": "Start date", "description": "First local calendar day to recalculate."},
+        "end_date": {"name": "End date", "description": "Last local calendar day to recalculate."},
+        "dry_run": {"name": "Preview only", "description": "Return matching hour counts without writing statistics."}
       }
     }
   },

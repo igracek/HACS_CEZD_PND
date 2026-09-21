@@ -37,11 +37,17 @@ from .const import (
     CONF_BILLING_START_DATE,
     CONF_BROWSER_HEADLESS,
     CONF_CLIENT_MODE,
+    CONF_COST_TRACKING,
     CONF_DEBUG_DIR,
     CONF_DEBUG_MODE,
     CONF_EAN,
     CONF_ELM,
     CONF_PASSWORD,
+    CONF_PRICE_CURRENCY,
+    CONF_PRICE_NT,
+    CONF_PRICE_SCHEDULE,
+    CONF_PRICE_VALID_FROM,
+    CONF_PRICE_VT,
     CONF_SCAN_TIME,
     CONF_TARIFF_ENTITY,
     CONF_USERNAME,
@@ -59,6 +65,7 @@ from .coordinator import (
     BrowserWorkerOwnership,
     _async_safe_remove_dir,
 )
+from .pricing import PriceCurrencyMismatchError, PriceScheduleError, merge_price_period
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -539,6 +546,11 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
         """Manage the options and password rotation."""
         errors: Dict[str, str] = {}
         entry = self.entry
+        current_options = getattr(entry, "options", {})
+        current_data = getattr(entry, "data", {})
+
+        def get_val(key: str, default: Any = None) -> Any:
+            return current_options.get(key, current_data.get(key, default))
 
         if user_input is not None:
             new_password = user_input.get(CONF_PASSWORD)
@@ -613,15 +625,47 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
                 if not errors:
                     # Clean options: never store password in options dict
                     clean_options = {k: v for k, v in user_input.items() if k != CONF_PASSWORD}
+                    existing_schedule = list(current_options.get(CONF_PRICE_SCHEDULE, []))
+                    if user_input.get(CONF_COST_TRACKING, False):
+                        try:
+                            currency = str(self.hass.config.currency).upper()
+                            clean_options[CONF_PRICE_SCHEDULE] = merge_price_period(
+                                existing_schedule,
+                                valid_from=user_input.get(CONF_PRICE_VALID_FROM),
+                                price_vt=user_input.get(CONF_PRICE_VT),
+                                price_nt=user_input.get(CONF_PRICE_NT),
+                                currency=currency,
+                            )
+                            clean_options[CONF_PRICE_CURRENCY] = currency
+                        except PriceCurrencyMismatchError:
+                            errors["base"] = "price_currency_mismatch"
+                        except PriceScheduleError:
+                            errors["base"] = "invalid_price_settings"
+                    elif existing_schedule:
+                        clean_options[CONF_PRICE_SCHEDULE] = existing_schedule
+                        if CONF_PRICE_CURRENCY in current_options:
+                            clean_options[CONF_PRICE_CURRENCY] = current_options[CONF_PRICE_CURRENCY]
+                    if errors:
+                        return self.async_show_form(
+                            step_id="init",
+                            data_schema=self._options_schema(get_val),
+                            errors=errors,
+                        )
                     return self.async_create_entry(title="", data=clean_options)
 
-        current_options = getattr(entry, "options", {})
-        current_data = getattr(entry, "data", {})
+        schema = self._options_schema(get_val)
 
-        def get_val(key: str, default: Any = None) -> Any:
-            return current_options.get(key, current_data.get(key, default))
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+        )
 
-        schema = vol.Schema({
+    def _options_schema(self, get_val: Any) -> vol.Schema:
+        """Build the options schema with the configured HA currency."""
+        currency = str(getattr(getattr(self.hass, "config", None), "currency", "CZK"))
+        unit = f"{currency.upper()}/kWh"
+        return vol.Schema({
             vol.Optional(
                 CONF_CLIENT_MODE,
                 default=get_val(CONF_CLIENT_MODE, DEFAULT_CLIENT_MODE),
@@ -657,10 +701,36 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_DEBUG_DIR,
                 default=get_val(CONF_DEBUG_DIR, DEFAULT_DEBUG_DIR),
             ): cv.string,
+            vol.Optional(
+                CONF_COST_TRACKING,
+                default=get_val(CONF_COST_TRACKING, False),
+            ): cv.boolean,
+            vol.Optional(
+                CONF_PRICE_VT,
+                description={"suggested_value": get_val(CONF_PRICE_VT)},
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=10000,
+                    step="any",
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement=unit,
+                )
+            ),
+            vol.Optional(
+                CONF_PRICE_NT,
+                description={"suggested_value": get_val(CONF_PRICE_NT)},
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=10000,
+                    step="any",
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement=unit,
+                )
+            ),
+            vol.Optional(
+                CONF_PRICE_VALID_FROM,
+                description={"suggested_value": get_val(CONF_PRICE_VALID_FROM)},
+            ): selector.DateSelector(selector.DateSelectorConfig()),
         })
-
-        return self.async_show_form(
-            step_id="init",
-            data_schema=schema,
-            errors=errors,
-        )
