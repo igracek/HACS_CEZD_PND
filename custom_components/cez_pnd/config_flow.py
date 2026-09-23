@@ -350,6 +350,10 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             ),
+            vol.Optional(
+                CONF_DEBUG_MODE,
+                default=(user_input or {}).get(CONF_DEBUG_MODE, DEFAULT_DEBUG_MODE),
+            ): cv.boolean,
             vol.Optional(CONF_TARIFF_ENTITY): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain=["binary_sensor", "input_boolean", "sensor"])
             ),

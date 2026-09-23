@@ -100,7 +100,7 @@ Integraci lze přidat do HACS jako vlastní repozitář:
    - **Volitelná VT/NT entita:** Např. `binary_sensor.hdo_tarif` (ON = VT, OFF = NT). Pokud není zadána, vše se počítá jako VT.
    - **Počáteční datum odečtu:** Volitelné datum posledního ročního nebo fakturačního odečtu. Lze je později změnit v možnostech integrace.
    - **Čas denního stahování:** Výchozí `06:00`.
-   - **Debug režim / Ladicí složka:** Volitelná aktivace rozšířeného debugování (ve výchozím stavu vypnuto) a volba cílové složky (`/config/cez_pnd_debug/`).
+   - **Diagnostika prvního připojení:** Volitelné bezpečné záznamy v HA logu (ve výchozím stavu vypnuto). Ladicí složka se nastavuje až v možnostech integrace; při přímém HTTP připojení se nevytváří.
 
 ### 5. 🚀 Prvotní načtení historických dat (Backfilling)
 Při prvotní instalaci integrace automaticky stáhne naměřená data za předchozí den (Den-1). Pokud si přejete do Home Assistant Energy Dashboardu načíst delší historii (např. 1 až 2 měsíce zpětně):
@@ -207,7 +207,9 @@ Souborové záchyty jsou dostupné jen v režimu prohlížeče a pouze v bezpeč
 *Ladicí soubory mají bezpečnostní práva `0600` a staré snímky jsou automaticky promazávány (udržuje se max. 5 nejnovějších sad po dobu 7 dní).*
 
 ### 3. Povolení debug logování
-V `configuration.yaml` přidejte:
+Pokud selže přidání integrace v režimu přímého HTTP, zapněte v úvodním formuláři volbu **Zapsat bezpečnou diagnostiku při prvním připojení**, pokus zopakujte a v **Nastavení → Systém → Protokoly** vyhledejte řádky ze stejného času. Zkopírujte zejména `HTTP debug stage=initial_verification_failure`, dále související `operation_phase`, `response`, `read`, `dashboard_parse`, `dashboard_contract`, `dashboard_unusable` a `meters_parse` a případný řádek `Unexpected error during login verification`. Spolu s časem pokusu, verzí HA a režimem připojení je přiložte k [issue #2](https://github.com/igracek/HACS_CEZD_PND/issues/2). Před zveřejněním zkontrolujte a odstraňte hesla, cookies, tokeny a úplné EAN/ELM. V tomto režimu se složka `/config/cez_pnd_debug/` nevytváří.
+
+Pro podrobnější ladění již přidané integrace lze v `configuration.yaml` navíc nastavit:
 ```yaml
 logger:
   default: info

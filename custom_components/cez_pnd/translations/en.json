@@ -10,6 +10,7 @@
           "ean": "EAN Code (18 digits)",
           "elm": "Electricity Meter Number (ELM)",
           "client_mode": "Client Mode (Direct HTTP / Browser)",
+          "debug_mode": "Log safe diagnostics during initial connection",
           "tariff_entity": "Optional VT/NT Tariff boolean entity (e.g. binary_sensor.hdo)",
           "billing_start_date": "Optional Billing Period Start Date (YYYY-MM-DD)",
           "scan_time": "Daily scan time (HH:MM)"

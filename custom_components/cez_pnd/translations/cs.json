@@ -10,6 +10,7 @@
           "ean": "EAN kód odběrného místa (18 číslic)",
           "elm": "Číslo elektroměru (ELM)",
           "client_mode": "Režim klienta (přímý HTTP / prohlížeč)",
+          "debug_mode": "Zapsat bezpečnou diagnostiku při prvním připojení",
           "tariff_entity": "Volitelná entita stavu HDO / VT-NT (např. binary_sensor.hdo)",
           "billing_start_date": "Volitelné počáteční datum odečtu (RRRR-MM-DD)",
           "scan_time": "Čas denního stahování (HH:MM)"

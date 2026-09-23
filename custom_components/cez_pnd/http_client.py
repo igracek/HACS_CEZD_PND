@@ -364,11 +364,65 @@ class PndHttpClient:
             "custom_range_consumption",
             "custom_range_production",
             "complete",
+            "initial_login",
+            "initial_dashboard",
+            "initial_meter",
         }
         if not bool(self.debug_mode):
             return
         safe_phase = phase if phase in allowed_phases else "unknown"
         _LOGGER.warning("HTTP debug stage=operation_phase phase=%s", safe_phase)
+
+    def _debug_initial_verification_failure(self, phase: str, err: Exception) -> None:
+        """Log only fixed diagnostic labels for a failed initial setup attempt."""
+        if not bool(self.debug_mode):
+            return
+        safe_phase = phase if phase in {"initial_login", "initial_dashboard", "initial_meter"} else "unknown"
+        message = str(err)
+        if isinstance(err, PndParseError):
+            dashboard_reasons = {
+                "Dashboard metadata has an invalid shape (ERR_PORTAL)": "dashboard_shape",
+                "Dashboard metadata has an invalid list size (ERR_PORTAL)": "dashboard_list_size",
+                "Dashboard metadata contains a non-object record (ERR_PORTAL)": "dashboard_record_shape",
+                "Dashboard metadata contains a missing device set (ERR_PORTAL)": "dashboard_missing_device_set",
+                "Dashboard metadata contains an invalid device set (ERR_PORTAL)": "dashboard_invalid_device_set",
+                "Dashboard metadata contains an invalid identifier (ERR_PORTAL)": "dashboard_invalid_elm",
+                "Dashboard metadata contains conflicting ELM identifiers (ERR_PORTAL)": "dashboard_conflicting_elm",
+                "Dashboard metadata contains an invalid EAN (ERR_PORTAL)": "dashboard_invalid_ean",
+                "Dashboard metadata contains a missing or conflicting device set (ERR_PORTAL)": "dashboard_no_device_set",
+                "Dashboard metadata is invalid (ERR_PORTAL)": "dashboard_json",
+            }
+            if message in dashboard_reasons:
+                reason = dashboard_reasons[message]
+            elif message.startswith("Dashboard metadata"):
+                reason = "dashboard_contract"
+            elif message.startswith("Metadata field") or message.startswith("Metadata contains"):
+                reason = "meter_list_contract"
+            elif message.startswith("Meter response"):
+                reason = "meter_contract"
+            elif message.startswith("Selected meter") or message.startswith("Configured meter selection"):
+                reason = "meter_selection"
+            else:
+                reason = "parse_other"
+        elif isinstance(err, PndPortalError):
+            if message.startswith("HTTP request error"):
+                reason = "request_error"
+            elif message.startswith("HTTP response") or message.startswith("Malformed response") or message.startswith("Response exceeds"):
+                reason = "response_error"
+            elif message.startswith("Meter selection"):
+                reason = "meter_unavailable"
+            else:
+                reason = "portal_other"
+        else:
+            reason = type(err).__name__ if type(err) in {
+                PndAuthError, PndCaptchaError, PndAccountLockedError,
+                PndMaintenanceError, PndTimeoutError, PndElmNotFoundError,
+                PndElmUnavailableError,
+            } else "unexpected"
+        _LOGGER.warning(
+            "HTTP debug stage=initial_verification_failure phase=%s reason=%s",
+            safe_phase, reason,
+        )
 
     def _mask_sensitive(self, text: str) -> str:
         """Mask sensitive data in strings for logging and debugging."""
@@ -908,6 +962,10 @@ class PndHttpClient:
                         response_status, **contract_fields
                     )
                 return normalized
+            self._debug_http_event(
+                "dashboard_unusable", "GET", response_url,
+                response_status, mime=content_type,
+            )
         except (PndAuthError, PndTimeoutError, PndPortalError, PndParseError):
             raise
         except Exception:
@@ -1443,11 +1501,20 @@ class PndHttpClient:
         """Test HTTP login credentials and configured ELM."""
         session = requests.Session()
         session.headers.update({"User-Agent": DEFAULT_USER_AGENT})
+        phase = "initial_login"
         try:
+            self._debug_operation_phase(phase)
             self._login(session, stop_event, deadline)
+            phase = "initial_dashboard"
+            self._debug_operation_phase(phase)
             metadata = self._fetch_dashboard_metadata(session, stop_event, deadline)
+            phase = "initial_meter"
+            self._debug_operation_phase(phase)
             available_elms = self._select_elm(session, metadata, stop_event, deadline) or []
             return True, self.app_version or "PND 2.0", available_elms
+        except Exception as err:
+            self._debug_initial_verification_failure(phase, err)
+            raise
         finally:
             session.close()
 
