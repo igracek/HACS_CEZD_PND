@@ -149,9 +149,9 @@ def _normalize_dashboard_payload(payload: Any) -> Dict[str, Any]:
         if not isinstance(item, dict):
             raise PndParseError("Dashboard metadata contains a non-object record (ERR_PORTAL)")
 
-        if "idDeviceSet" not in item:
-            raise PndParseError("Dashboard metadata contains a missing device set (ERR_PORTAL)")
-        device_set = item["idDeviceSet"]
+        # Current PND accounts can expose a meter and permit ELM-only CSV
+        # export without ever assigning a device set to the dashboard window.
+        device_set = item.get("idDeviceSet")
         if device_set is not None:
             if isinstance(device_set, bool) or not isinstance(device_set, int):
                 raise PndParseError("Dashboard metadata contains an invalid device set (ERR_PORTAL)")
@@ -194,9 +194,6 @@ def _normalize_dashboard_payload(payload: Any) -> Dict[str, Any]:
                 meter["ean"] = next(iter(normalized_eans))
             if meter not in electrometers:
                 electrometers.append(meter)
-
-    if not device_sets:
-        raise PndParseError("Dashboard metadata contains a missing or conflicting device set (ERR_PORTAL)")
 
     if not elm_contracts:
         elm_contract = ELM_CONTRACT_ABSENT
@@ -1066,6 +1063,23 @@ class PndHttpClient:
         if metadata is not None:
             if device_sets:
                 metadata["idDeviceSet"] = next(iter(device_sets))
+            elif "elmMetadataStatus" in metadata:
+                # A list dashboard may have a device set for another meter,
+                # but never borrow it if multiple ELMs are present.  A
+                # single ELM plus a single set can appear in separate window
+                # records (the existing, working dashboard contract).
+                if metadata.get("idDeviceSet"):
+                    if len(set(available_elms)) != 1:
+                        raise PndParseError("Selected meter has no device set (ERR_PORTAL)")
+                elif any(
+                    record.get("idDeviceSet") is not None for record in records
+                ):
+                    raise PndParseError("Selected meter has no device set (ERR_PORTAL)")
+                else:
+                    if not (self.elm or selected_elms):
+                        raise PndParseError("Selected meter has no device set (ERR_PORTAL)")
+                    metadata.pop("requiresMeterDeviceSet", None)
+                    metadata.pop("idDeviceSet", None)
             elif metadata.get("requiresMeterDeviceSet") or (
                 any("idDeviceSet" in record for record in records) and not metadata.get("idDeviceSet")
             ):
