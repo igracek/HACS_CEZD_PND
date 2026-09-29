@@ -16,6 +16,13 @@
           "scan_time": "Čas denního stahování (HH:MM)"
         }
       },
+      "identity_warning": {
+        "title": "V exportu PND nelze ověřit EAN",
+        "description": "Přihlášení prošlo a portál vrátil CSV pro jedinou sadu zařízení, ale dashboard ani CSV nepotvrzují, že údaje patří k zadanému EAN a ELM. Máte-li v účtu více EAN, hodnoty by se mohly přiřadit k nesprávným statistikám Home Assistantu. Zkontrolujte vazbu EAN a elektroměru v portálu PND. Pokračujte pouze tehdy, pokud toto riziko přijímáte; jinak konfiguraci zrušte a pošlete bezpečný diagnostický log do issue #2.",
+        "data": {
+          "confirm_unverified_identity": "Zkontroloval(a) jsem vazbu elektroměru a beru na vědomí, že PND EAN v exportu neověřuje"
+        }
+      },
       "reauth_confirm": {
         "title": "Obnovení přihlášení ČEZ PND",
         "description": "Zadejte nové heslo pro účet odběrného místa {ean}.",
@@ -51,13 +58,16 @@
       "timeout": "Vypršel časový limit pro komunikaci s portálem ČEZ PND.",
       "elm_not_found": "Zadané číslo ELM nebylo nalezeno v nabídce portálu.",
       "elm_unavailable": "Účet PND neposkytuje identifikátor ELM v podporovaném poli.",
+      "identity_mismatch": "CSV export uvádí jiný EAN nebo elektroměr. Zkontrolujte nastavení; data nebyla importována.",
+      "confirmation_required": "Pokračování vyžaduje výslovné potvrzení upozornění na identitu.",
       "service_unavailable": "Portál ČEZ PND prochází údržbou / odstávkou.",
       "unknown": "Došlo k neočekávané chybě."
     },
     "abort": {
       "already_configured": "Toto odběrné místo (EAN) je již v Home Assistant nakonfigurováno.",
       "reauth_successful": "Opětovné přihlášení proběhlo úspěšně.",
-      "reconfigure_successful": "Konfigurace byla úspěšně aktualizována."
+      "reconfigure_successful": "Konfigurace byla úspěšně aktualizována.",
+      "identity_confirmation_expired": "Potvrzení identity vypršelo; spusťte konfiguraci znovu."
     }
   },
   "options": {

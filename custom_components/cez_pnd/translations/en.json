@@ -16,6 +16,13 @@
           "scan_time": "Daily scan time (HH:MM)"
         }
       },
+      "identity_warning": {
+        "title": "Cannot verify the EAN in the PND export",
+        "description": "The portal accepted the login and returned a CSV for its only device set, but neither the dashboard nor the CSV proves that the data belongs to the EAN and ELM you entered. If your account has multiple EANs, values could be assigned to the wrong Home Assistant statistics. Check the EAN, ELM and meter relationship in the PND portal. Continue only if you accept this risk; otherwise cancel and share the safe diagnostic log in issue #2.",
+        "data": {
+          "confirm_unverified_identity": "I checked the meter relationship and accept that PND does not verify this EAN in the export"
+        }
+      },
       "reauth_confirm": {
         "title": "Reauthenticate with CEZ PND",
         "description": "Enter new password for EAN {ean}.",
@@ -51,13 +58,16 @@
       "timeout": "Connection to CEZ PND portal timed out.",
       "elm_not_found": "Specified ELM number was not found in account.",
       "elm_unavailable": "The PND account does not provide an ELM identifier in a supported field.",
+      "identity_mismatch": "The CSV export identifies a different EAN or meter. Check your configuration; no data was imported.",
+      "confirmation_required": "Confirm the identity warning explicitly to continue.",
       "service_unavailable": "CEZ PND portal is under maintenance.",
       "unknown": "Unexpected error occurred."
     },
     "abort": {
       "already_configured": "This EAN is already configured in Home Assistant.",
       "reauth_successful": "Reauthentication successful.",
-      "reconfigure_successful": "Configuration successfully updated."
+      "reconfigure_successful": "Configuration successfully updated.",
+      "identity_confirmation_expired": "The identity confirmation expired; start setup again."
     }
   },
   "options": {

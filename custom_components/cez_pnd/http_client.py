@@ -1,14 +1,18 @@
 """Direct HTTP client for CEZ Distribuce PND portal (browserless mode)."""
 import codecs
+import csv
 from datetime import datetime, timedelta
+import io
 import json
 import logging
 import os
 import re
 import secrets
 import stat
+import tempfile
 import threading
 import time
+import unicodedata
 from collections.abc import Mapping
 from typing import Any, Dict, Final, List, Optional, Protocol, Tuple, Union
 from urllib.parse import urljoin, urlsplit
@@ -23,6 +27,8 @@ from .client import (
     PndCaptchaError,
     PndElmNotFoundError,
     PndElmUnavailableError,
+    PndExportIdentityMismatchError,
+    PndIdentityUnverifiedError,
     PndInsecureBrowserError,
     PndMaintenanceError,
     PndParseError,
@@ -38,6 +44,7 @@ from .const import (
     CONF_DEBUG_MODE,
     CONF_EAN,
     CONF_ELM,
+    CONF_UNVERIFIED_IDENTITY_CONFIRMED,
     CONF_PASSWORD,
     CONF_USERNAME,
     DEFAULT_DEBUG_DIR,
@@ -274,6 +281,7 @@ class PndHttpClient:
         self.password = str(config.get(CONF_PASSWORD, config.get("password", "")))
         self.elm = str(config.get(CONF_ELM, config.get("elm", ""))).strip()
         self.ean = str(config.get(CONF_EAN, config.get("ean", ""))).strip()
+        self.unverified_identity_confirmed = config.get(CONF_UNVERIFIED_IDENTITY_CONFIRMED) is True
         self.debug_mode = config.get(CONF_DEBUG_MODE, DEFAULT_DEBUG_MODE)
         self.debug_dir = config.get(CONF_DEBUG_DIR, DEFAULT_DEBUG_DIR)
         self.app_version: Optional[str] = "PND 2.0"
@@ -434,6 +442,10 @@ class PndHttpClient:
                 reason = "meter_unavailable"
             else:
                 reason = "portal_other"
+        elif isinstance(err, PndIdentityUnverifiedError):
+            reason = "identity_unverified"
+        elif isinstance(err, PndExportIdentityMismatchError):
+            reason = "identity_mismatch"
         else:
             reason = type(err).__name__ if type(err) in {
                 PndAuthError, PndCaptchaError, PndAccountLockedError,
@@ -1554,6 +1566,78 @@ class PndHttpClient:
         finally:
             session.close()
 
+    def _inspect_export_identity(self, path: str) -> str:
+        """Check explicit CSV identity columns; absence is not proof of identity."""
+        fd = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size > MAX_CSV_RESPONSE_SIZE:
+                raise PndParseError("Identity report is invalid (ERR_PORTAL)")
+            with os.fdopen(fd, "rb") as report:
+                fd = -1
+                payload = report.read(MAX_CSV_RESPONSE_SIZE + 1)
+            if len(payload) > MAX_CSV_RESPONSE_SIZE:
+                raise PndParseError("Identity report exceeds size limit (ERR_PORTAL)")
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        try:
+            text = payload.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = payload.decode("cp1250")
+
+        lines = text.splitlines()
+        if not lines:
+            raise PndParseError("Identity report is empty (ERR_PORTAL)")
+        delimiter = ";" if ";" in lines[0] else ","
+        try:
+            reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+            header = next(reader, [])
+            if len(header) > 50:
+                raise PndParseError("Identity report has too many columns (ERR_PORTAL)")
+            normalized = [
+                re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", name)
+                       .encode("ascii", "ignore").decode("ascii").lower())
+                for name in header
+            ]
+            ean_columns = [i for i, name in enumerate(normalized) if name in {
+                "ean", "eankod", "eancode", "eanodbernehomista", "eanmeteringpoint"
+            }]
+            elm_columns = [i for i, name in enumerate(normalized) if name in {
+                "elm", "electrometerid", "cisloelektromeru"
+            }]
+            if not ean_columns and not elm_columns:
+                return "unverified"
+            matched_same_row = False
+            for row_number, row in enumerate(reader, 1):
+                if row_number > 10000 or len(row) > 50:
+                    raise PndParseError("Identity report is too large (ERR_PORTAL)")
+                row_has_ean = False
+                row_has_elm = False
+                for index in ean_columns:
+                    value = row[index].strip() if index < len(row) else ""
+                    if value:
+                        row_has_ean = True
+                        if value != self.ean:
+                            raise PndExportIdentityMismatchError(
+                                "Export EAN differs from configured EAN (ERR_ELM_NOT_FOUND)"
+                            )
+                for index in elm_columns:
+                    value = row[index].strip() if index < len(row) else ""
+                    if value:
+                        row_has_elm = True
+                        if value != self.elm:
+                            raise PndExportIdentityMismatchError(
+                                "Export ELM differs from configured ELM (ERR_ELM_NOT_FOUND)"
+                            )
+                matched_same_row = matched_same_row or (row_has_ean and row_has_elm)
+        except csv.Error as err:
+            raise PndParseError("Identity report CSV is invalid (ERR_PORTAL)") from err
+        return "verified" if matched_same_row else "unverified"
+
     def test_login(
         self,
         temp_dir: Optional[str] = None,
@@ -1573,6 +1657,41 @@ class PndHttpClient:
             metadata = self._fetch_dashboard_metadata(session, stop_event, deadline)
             phase = "initial_meter"
             self._debug_operation_phase(phase)
+            if metadata.get("elmMetadataStatus") == ELM_CONTRACT_ABSENT:
+                device_set, plan, _ = self._export_selector_plan(
+                    session, metadata, stop_event, deadline
+                )
+                if plan != [EXPORT_SELECTOR_DEVICE_SET] or not device_set:
+                    raise PndElmUnavailableError(
+                        "PND did not provide an unambiguous export selector (ERR_ELM_UNAVAILABLE)"
+                    )
+                def probe(directory: str) -> str:
+                    today = datetime.now().strftime("%d.%m.%Y")
+                    week_ago = (datetime.now() - timedelta(days=7)).strftime("%d.%m.%Y")
+                    path = self._fetch_csv_report(
+                        session, directory, "identity-probe.csv",
+                        ASSEMBLY_RANGE_CONSUMPTION,
+                        id_device_set=device_set, date_from=week_ago, date_to=today,
+                        stop_event=stop_event, deadline=deadline,
+                        selector_mode=EXPORT_SELECTOR_DEVICE_SET,
+                    )
+                    return self._inspect_export_identity(path)
+
+                if temp_dir is None:
+                    with tempfile.TemporaryDirectory(prefix="cez_pnd_identity_") as directory:
+                        identity_result = probe(directory)
+                else:
+                    identity_result = probe(temp_dir)
+                if identity_result == "unverified":
+                    _LOGGER.warning(
+                        "PND identity check result=unverified basis=single_device_set; "
+                        "CSV does not verify both EAN and ELM"
+                    )
+                    if not self.unverified_identity_confirmed:
+                        raise PndIdentityUnverifiedError(
+                            "Export has no verifiable EAN binding (ERR_IDENTITY_UNVERIFIED)"
+                        )
+                return True, self.app_version or "PND 2.0", []
             available_elms = self._select_elm(session, metadata, stop_event, deadline) or []
             return True, self.app_version or "PND 2.0", available_elms
         except Exception as err:

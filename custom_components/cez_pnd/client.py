@@ -95,6 +95,14 @@ class PndElmUnavailableError(PndError):
     """PND account metadata does not provide a usable ELM identifier."""
 
 
+class PndIdentityUnverifiedError(PndElmUnavailableError):
+    """An export works, but it does not prove the configured EAN/ELM binding."""
+
+
+class PndExportIdentityMismatchError(PndElmNotFoundError):
+    """An export explicitly identifies a different EAN or ELM."""
+
+
 class PndMaintenanceError(PndError):
     """CEZ PND portal is under maintenance."""
 

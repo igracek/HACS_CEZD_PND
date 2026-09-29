@@ -27,6 +27,8 @@ from .client import (
     PndCaptchaError,
     PndElmNotFoundError,
     PndElmUnavailableError,
+    PndExportIdentityMismatchError,
+    PndIdentityUnverifiedError,
     PndMaintenanceError,
     PndScraperClient,
     PndTimeoutError,
@@ -42,6 +44,7 @@ from .const import (
     CONF_DEBUG_MODE,
     CONF_EAN,
     CONF_ELM,
+    CONF_UNVERIFIED_IDENTITY_CONFIRMED,
     CONF_PASSWORD,
     CONF_PRICE_CURRENCY,
     CONF_PRICE_NT,
@@ -256,6 +259,7 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize flow instance."""
         self._reauth_entry: Optional[config_entries.ConfigEntry] = None
         self._reconfigure_entry: Optional[config_entries.ConfigEntry] = None
+        self._pending_identity_confirmation: Optional[Dict[str, Any]] = None
 
     def _get_context_entry(self) -> Optional[config_entries.ConfigEntry]:
         """Safely fetch config entry from flow context."""
@@ -314,6 +318,11 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Test connection and authentication
                 try:
                     await _test_credentials(self.hass, user_input)
+                except PndIdentityUnverifiedError:
+                    self._pending_identity_confirmation = dict(user_input)
+                    return await self.async_step_identity_warning()
+                except PndExportIdentityMismatchError:
+                    errors["base"] = "identity_mismatch"
                 except PndAuthError:
                     errors["base"] = "invalid_auth"
                 except PndCaptchaError:
@@ -366,6 +375,49 @@ class CezPndConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=schema,
+            errors=errors,
+        )
+
+    async def async_step_identity_warning(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> FlowResult:
+        """Require an explicit decision when the export has no EAN binding."""
+        pending = self._pending_identity_confirmation
+        if pending is None:
+            return self.async_abort(reason="identity_confirmation_expired")
+        errors: Dict[str, str] = {}
+        if user_input is not None:
+            if user_input.get("confirm_unverified_identity") is not True:
+                errors["base"] = "confirmation_required"
+            else:
+                confirmed = {
+                    **pending,
+                    CONF_UNVERIFIED_IDENTITY_CONFIRMED: True,
+                }
+                try:
+                    await _test_credentials(self.hass, confirmed)
+                except PndExportIdentityMismatchError:
+                    errors["base"] = "identity_mismatch"
+                except PndAuthError:
+                    errors["base"] = "invalid_auth"
+                except PndTimeoutError:
+                    errors["base"] = "timeout"
+                except PndElmUnavailableError:
+                    errors["base"] = "elm_unavailable"
+                except Exception as err:
+                    _LOGGER.error("Identity confirmation failed: %s", type(err).__name__)
+                    errors["base"] = "cannot_connect"
+                if not errors:
+                    self._pending_identity_confirmation = None
+                    return self.async_create_entry(
+                        title=f"ČEZ PND ({mask_ean(pending[CONF_EAN])})",
+                        data=confirmed,
+                    )
+        return self.async_show_form(
+            step_id="identity_warning",
+            data_schema=vol.Schema({
+                vol.Required("confirm_unverified_identity", default=False): cv.boolean,
+            }),
             errors=errors,
         )
 
