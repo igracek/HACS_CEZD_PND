@@ -9,8 +9,12 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_CLIENT_MODE, DEFAULT_CLIENT_MODE, DOMAIN, PLATFORMS
+from .const import (
+    CONF_CLIENT_MODE, CONF_COST_TRACKING, CONF_PRICE_SCHEDULE,
+    CONF_TARIFF_ENTITY, DEFAULT_CLIENT_MODE, DOMAIN, PLATFORMS,
+)
 from .coordinator import CezPndCoordinator
+from .pricing import migrate_single_tariff_schedule
 from .services import async_setup_services, async_unload_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,6 +45,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.config_entries.async_update_entry(
             entry, data={**entry.data, CONF_CLIENT_MODE: DEFAULT_CLIENT_MODE}
         )
+    # Migrate only unambiguous legacy one-tariff periods before the first
+    # refresh can write cost statistics. Ambiguous periods stay untouched.
+    if (
+        entry.options.get(CONF_COST_TRACKING, False)
+        and not entry.options.get(CONF_TARIFF_ENTITY, entry.data.get(CONF_TARIFF_ENTITY))
+        and entry.options.get(CONF_PRICE_SCHEDULE)
+    ):
+        migrated, _ = migrate_single_tariff_schedule(entry.options[CONF_PRICE_SCHEDULE])
+        if migrated != entry.options[CONF_PRICE_SCHEDULE]:
+            hass.config_entries.async_update_entry(
+                entry, options={**entry.options, CONF_PRICE_SCHEDULE: migrated}
+            )
     coordinator = CezPndCoordinator(hass, entry)
     entry.runtime_data = coordinator
 
@@ -50,6 +66,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     platforms_forwarded = False
 
     try:
+        # Preflight existing metadata before the initial refresh can import
+        # cost points. An incompatible old unit disables cost writes.
+        await coordinator.stats_manager.async_migrate_cost_currency_metadata()
+
         # První inicializační refresh - vyvolá ConfigEntryAuthFailed při selhání autentizace (SEC04-05, SEC05-07)
         await coordinator.async_config_entry_first_refresh()
 

@@ -41,6 +41,8 @@ cez_pnd_debug/
 cookies.json
 cez_pnd_cookies.json
 *.png
+!custom_components/cez_pnd/brand/icon.png
+!custom_components/cez_pnd/brand/logo.png
 *.log
 tmp/
 temp/

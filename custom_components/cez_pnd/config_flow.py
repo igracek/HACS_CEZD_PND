@@ -49,6 +49,7 @@ from .const import (
     CONF_PRICE_CURRENCY,
     CONF_PRICE_NT,
     CONF_PRICE_SCHEDULE,
+    CONF_PRICE_SINGLE,
     CONF_PRICE_VALID_FROM,
     CONF_PRICE_VT,
     CONF_SCAN_TIME,
@@ -68,11 +69,39 @@ from .coordinator import (
     BrowserWorkerOwnership,
     _async_safe_remove_dir,
 )
-from .pricing import PriceCurrencyMismatchError, PriceScheduleError, merge_price_period
+from .pricing import (
+    PriceCurrencyMismatchError,
+    PriceScheduleError,
+    merge_price_period,
+    migrate_single_tariff_schedule,
+    single_tariff_price,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 MAX_CREDENTIAL_LENGTH = 256
+
+
+class _ConditionalNumberSelector(selector.NumberSelector):
+    """Expose HA 2026.8+ ha-form visibility in a config-flow field."""
+
+    def __init__(self, config: Any, visible: Dict[str, Any]) -> None:
+        super().__init__(config)
+        self._visible = visible
+
+    def serialize(self) -> Dict[str, Any]:
+        return {**super().serialize(), "visible": self._visible}
+
+
+class _ConditionalDateSelector(selector.DateSelector):
+    """Date selector with the same conditional visibility contract."""
+
+    def __init__(self, config: Any, visible: Dict[str, Any]) -> None:
+        super().__init__(config)
+        self._visible = visible
+
+    def serialize(self) -> Dict[str, Any]:
+        return {**super().serialize(), "visible": self._visible}
 
 
 def credentials_within_length_limit(user_input: Dict[str, Any]) -> bool:
@@ -584,6 +613,7 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry: Optional[config_entries.ConfigEntry] = None) -> None:
         """Initialize options flow."""
         self._entry = config_entry
+        self._pending_options: Dict[str, Any] = {}
 
     @property
     def entry(self) -> config_entries.ConfigEntry:
@@ -672,42 +702,14 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
                         _LOGGER.error("Password update verification failed: %s", type(err).__name__)
                         errors["base"] = "cannot_connect"
 
-                    if not errors:
-                        # Atomically update entry data
-                        new_data = dict(getattr(entry, "data", {}))
-                        new_data[CONF_PASSWORD] = new_pwd_clean
-                        self.hass.config_entries.async_update_entry(entry, data=new_data)
-
                 if not errors:
-                    # Clean options: never store password in options dict
-                    clean_options = {k: v for k, v in user_input.items() if k != CONF_PASSWORD}
-                    existing_schedule = list(current_options.get(CONF_PRICE_SCHEDULE, []))
+                    self._pending_options = dict(user_input)
+                    # An absent optional selector means "remove HDO", including
+                    # when an older entry still has a tariff entity in data.
+                    self._pending_options.setdefault(CONF_TARIFF_ENTITY, "")
                     if user_input.get(CONF_COST_TRACKING, False):
-                        try:
-                            currency = str(self.hass.config.currency).upper()
-                            clean_options[CONF_PRICE_SCHEDULE] = merge_price_period(
-                                existing_schedule,
-                                valid_from=user_input.get(CONF_PRICE_VALID_FROM),
-                                price_vt=user_input.get(CONF_PRICE_VT),
-                                price_nt=user_input.get(CONF_PRICE_NT),
-                                currency=currency,
-                            )
-                            clean_options[CONF_PRICE_CURRENCY] = currency
-                        except PriceCurrencyMismatchError:
-                            errors["base"] = "price_currency_mismatch"
-                        except PriceScheduleError:
-                            errors["base"] = "invalid_price_settings"
-                    elif existing_schedule:
-                        clean_options[CONF_PRICE_SCHEDULE] = existing_schedule
-                        if CONF_PRICE_CURRENCY in current_options:
-                            clean_options[CONF_PRICE_CURRENCY] = current_options[CONF_PRICE_CURRENCY]
-                    if errors:
-                        return self.async_show_form(
-                            step_id="init",
-                            data_schema=self._options_schema(get_val),
-                            errors=errors,
-                        )
-                    return self.async_create_entry(title="", data=clean_options)
+                        return await self.async_step_costs(user_input)
+                    return self._save_options()
 
         schema = self._options_schema(get_val)
 
@@ -717,11 +719,114 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
             errors=errors,
         )
 
+    def _save_options(self, schedule: Optional[list[dict[str, Any]]] = None) -> FlowResult:
+        """Commit options and any verified password only after the complete flow."""
+        entry = self.entry
+        clean_options = {k: v for k, v in self._pending_options.items() if k != CONF_PASSWORD}
+        if not clean_options.get(CONF_COST_TRACKING, False):
+            for key in (CONF_PRICE_SINGLE, CONF_PRICE_VT, CONF_PRICE_NT, CONF_PRICE_VALID_FROM):
+                clean_options.pop(key, None)
+        current_options = getattr(entry, "options", {})
+        if schedule is not None:
+            clean_options[CONF_PRICE_SCHEDULE] = schedule
+            clean_options[CONF_PRICE_CURRENCY] = str(self.hass.config.currency).upper()
+        elif CONF_PRICE_SCHEDULE in current_options:
+            clean_options[CONF_PRICE_SCHEDULE] = current_options[CONF_PRICE_SCHEDULE]
+            if CONF_PRICE_CURRENCY in current_options:
+                clean_options[CONF_PRICE_CURRENCY] = current_options[CONF_PRICE_CURRENCY]
+        password = self._pending_options.get(CONF_PASSWORD)
+        if password and str(password).strip():
+            self.hass.config_entries.async_update_entry(
+                entry, data={**getattr(entry, "data", {}), CONF_PASSWORD: str(password)}
+            )
+        return self.async_create_entry(title="", data=clean_options)
+
+    async def async_step_costs(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> FlowResult:
+        """Show one price without HDO, or VT/NT prices with HDO."""
+        current_options = getattr(self.entry, "options", {})
+        has_hdo = bool(self._pending_options.get(CONF_TARIFF_ENTITY))
+        previous_hdo = bool(
+            current_options.get(
+                CONF_TARIFF_ENTITY,
+                getattr(self.entry, "data", {}).get(CONF_TARIFF_ENTITY),
+            )
+        )
+        existing = list(current_options.get(CONF_PRICE_SCHEDULE, []))
+        migrated, conflicts = migrate_single_tariff_schedule(existing) if not has_hdo else (existing, [])
+        errors: Dict[str, str] = {}
+        if user_input is not None:
+            try:
+                if has_hdo:
+                    vt, nt = user_input.get(CONF_PRICE_VT), user_input.get(CONF_PRICE_NT)
+                else:
+                    vt = nt = user_input.get(CONF_PRICE_SINGLE)
+                schedule = merge_price_period(
+                    migrated,
+                    valid_from=user_input.get(CONF_PRICE_VALID_FROM),
+                    price_vt=vt,
+                    price_nt=nt,
+                    currency=str(self.hass.config.currency).upper(),
+                )
+                self._pending_options[CONF_PRICE_VALID_FROM] = user_input[CONF_PRICE_VALID_FROM]
+                if has_hdo:
+                    self._pending_options[CONF_PRICE_VT] = vt
+                    self._pending_options[CONF_PRICE_NT] = nt
+                    self._pending_options.pop(CONF_PRICE_SINGLE, None)
+                else:
+                    self._pending_options[CONF_PRICE_SINGLE] = vt
+                    self._pending_options.pop(CONF_PRICE_VT, None)
+                    self._pending_options.pop(CONF_PRICE_NT, None)
+                return self._save_options(schedule)
+            except PriceCurrencyMismatchError:
+                errors["base"] = "price_currency_mismatch"
+            except (PriceScheduleError, KeyError):
+                errors["base"] = "invalid_price_settings"
+
+        return self.async_show_form(
+            step_id="costs",
+            data_schema=self._cost_schema(
+                has_hdo,
+                lambda key: self._price_value(
+                    current_options,
+                    key,
+                    prefer_vt_for_single=previous_hdo and not has_hdo,
+                ),
+            ),
+            errors=errors,
+            description_placeholders={"conflict_dates": ", ".join(conflicts) or "—"},
+        )
+
+    @staticmethod
+    def _price_value(
+        current_options: Dict[str, Any],
+        key: str,
+        *,
+        prefer_vt_for_single: bool = False,
+    ) -> Any:
+        """Find a price; only an explicit HDO removal may suggest the VT price."""
+        if key == CONF_PRICE_SINGLE and prefer_vt_for_single:
+            schedule = current_options.get(CONF_PRICE_SCHEDULE, [])
+            if schedule:
+                latest = max(schedule, key=lambda period: str(period.get("valid_from", "")))
+                return latest.get(CONF_PRICE_VT)
+            return current_options.get(CONF_PRICE_VT)
+        if key in current_options:
+            return current_options[key]
+        schedule = current_options.get(CONF_PRICE_SCHEDULE, [])
+        if not schedule:
+            return None
+        latest = max(schedule, key=lambda period: str(period.get("valid_from", "")))
+        if key == CONF_PRICE_VALID_FROM:
+            return latest.get("valid_from")
+        if key == CONF_PRICE_SINGLE:
+            return single_tariff_price(latest.get("price_vt"), latest.get("price_nt"))
+        return latest.get(key)
+
     def _options_schema(self, get_val: Any) -> vol.Schema:
-        """Build the options schema with the configured HA currency."""
-        currency = str(getattr(getattr(self.hass, "config", None), "currency", "CZK"))
-        unit = f"{currency.upper()}/kWh"
-        return vol.Schema({
+        """Build one reactive options form for cost tracking and HDO mode."""
+        fields: Dict[Any, Any] = {
             vol.Optional(
                 CONF_CLIENT_MODE,
                 default=get_val(CONF_CLIENT_MODE, DEFAULT_CLIENT_MODE),
@@ -761,32 +866,68 @@ class CezPndOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_COST_TRACKING,
                 default=get_val(CONF_COST_TRACKING, False),
             ): cv.boolean,
-            vol.Optional(
-                CONF_PRICE_VT,
-                description={"suggested_value": get_val(CONF_PRICE_VT)},
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=10000,
-                    step="any",
-                    mode=selector.NumberSelectorMode.BOX,
-                    unit_of_measurement=unit,
+        }
+        current_options = getattr(self.entry, "options", {})
+        previous_hdo = bool(get_val(CONF_TARIFF_ENTITY))
+        fields.update(
+            self._cost_schema(
+                False,
+                lambda key: self._price_value(
+                    current_options, key, prefer_vt_for_single=previous_hdo
+                ),
+                conditional=True,
+            ).schema
+        )
+        return vol.Schema(fields)
+
+    def _cost_schema(
+        self, has_hdo: bool, get_val: Any, *, conditional: bool = False
+    ) -> vol.Schema:
+        """Build the price form appropriate to the selected tariff source."""
+        currency = str(getattr(getattr(self.hass, "config", None), "currency", "CZK"))
+        price_config = selector.NumberSelectorConfig(
+            min=0, max=10000, step="any",
+            mode=selector.NumberSelectorMode.BOX,
+            unit_of_measurement=f"{currency.upper()}/kWh",
+        )
+        fields: Dict[Any, Any] = {}
+        if conditional:
+            tracking = {"field": CONF_COST_TRACKING, "value": True}
+            hdo_present = {"field": CONF_TARIFF_ENTITY, "operator": "exists"}
+            hdo_absent = {"field": CONF_TARIFF_ENTITY, "operator": "not_exists"}
+            for key, condition in (
+                (CONF_PRICE_SINGLE, hdo_absent),
+                (CONF_PRICE_VT, hdo_present),
+                (CONF_PRICE_NT, hdo_present),
+            ):
+                fields[vol.Optional(
+                    key, description={"suggested_value": get_val(key)}
+                )] = _ConditionalNumberSelector(
+                    price_config,
+                    {"condition": "and", "conditions": [tracking, condition]},
                 )
-            ),
-            vol.Optional(
-                CONF_PRICE_NT,
-                description={"suggested_value": get_val(CONF_PRICE_NT)},
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=10000,
-                    step="any",
-                    mode=selector.NumberSelectorMode.BOX,
-                    unit_of_measurement=unit,
-                )
-            ),
-            vol.Optional(
+            fields[vol.Optional(
                 CONF_PRICE_VALID_FROM,
                 description={"suggested_value": get_val(CONF_PRICE_VALID_FROM)},
-            ): selector.DateSelector(selector.DateSelectorConfig()),
-        })
+            )] = _ConditionalDateSelector(
+                selector.DateSelectorConfig(), tracking
+            )
+            return vol.Schema(fields)
+
+        price_selector = selector.NumberSelector(price_config)
+        if has_hdo:
+            fields[vol.Optional(
+                CONF_PRICE_VT, description={"suggested_value": get_val(CONF_PRICE_VT)}
+            )] = price_selector
+            fields[vol.Optional(
+                CONF_PRICE_NT, description={"suggested_value": get_val(CONF_PRICE_NT)}
+            )] = price_selector
+        else:
+            fields[vol.Optional(
+                CONF_PRICE_SINGLE, description={"suggested_value": get_val(CONF_PRICE_SINGLE)}
+            )] = price_selector
+        fields[vol.Optional(
+            CONF_PRICE_VALID_FROM,
+            description={"suggested_value": get_val(CONF_PRICE_VALID_FROM)},
+        )] = selector.DateSelector(selector.DateSelectorConfig())
+        return vol.Schema(fields)

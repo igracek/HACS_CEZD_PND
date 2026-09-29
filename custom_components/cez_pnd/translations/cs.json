@@ -12,7 +12,7 @@
           "client_mode": "Režim klienta (přímý HTTP / prohlížeč)",
           "debug_mode": "Zapsat bezpečnou diagnostiku při prvním připojení",
           "tariff_entity": "Volitelná entita stavu HDO / VT-NT (např. binary_sensor.hdo)",
-          "billing_start_date": "Volitelné počáteční datum odečtu (RRRR-MM-DD)",
+          "billing_start_date": "Volitelné počáteční datum odečtu",
           "scan_time": "Čas denního stahování (HH:MM)"
         }
       },
@@ -74,16 +74,26 @@
     "step": {
       "init": {
         "title": "Nastavení ČEZ Distribuce PND",
-        "description": "Upravte parametry stahování a tarifního vyhodnocení.",
+        "description": "Upravte parametry stahování a tarifního vyhodnocení. Zapnutí výpočtu nákladů zobrazí cenu; výběr entity HDO přepíná mezi jednou cenou a cenami VT/NT.",
         "data": {
           "password": "Nové heslo (ponechte prázdné pro zachování)",
           "client_mode": "Režim klienta (přímý HTTP / prohlížeč)",
           "tariff_entity": "Entita stavu HDO / VT-NT (ON = VT, OFF = NT)",
-          "billing_start_date": "Počáteční datum odečtu (RRRR-MM-DD)",
+          "billing_start_date": "Počáteční datum odečtu",
           "scan_time": "Čas denního stahování (HH:MM)",
           "debug_mode": "Aktivovat ladicí režim (Debug Mode)",
           "debug_dir": "Složka pro ladicí soubory a snímky",
-          "cost_tracking": "Počítat náklady pro VT/NT",
+          "cost_tracking": "Počítat náklady na elektřinu"
+        },
+        "data_description": {
+          "price_single": "Pro oddělené ceny VT a NT vyberte entitu HDO."
+        }
+      },
+      "costs": {
+        "title": "Nastavení ceny elektřiny",
+        "description": "Zadejte cenu a datum platnosti. Bez entity HDO platí jedna cena pro celou spotřebu. Pro rozlišení VT/NT vyberte entitu HDO v předchozím kroku. Starší ceny vyžadující opravu od: {conflict_dates}.",
+        "data": {
+          "price_single": "Cena elektřiny (včetně DPH)",
           "price_vt": "Variabilní cena ve VT (včetně DPH)",
           "price_nt": "Variabilní cena v NT (včetně DPH)",
           "price_valid_from": "Ceny platí od"
@@ -103,7 +113,7 @@
       "elm_unavailable": "Účet PND neposkytuje identifikátor ELM v podporovaném poli.",
       "service_unavailable": "Portál ČEZ PND prochází údržbou / odstávkou.",
       "cannot_connect": "Nepodařilo se navázat spojení s portálem ČEZ PND.",
-      "invalid_price_settings": "Zadejte platné ceny VT a NT a datum jejich platnosti.",
+      "invalid_price_settings": "Zadejte platnou cenu nebo ceny a datum jejich platnosti.",
       "price_currency_mismatch": "Měna Home Assistantu se liší od uloženého cenového kalendáře. Před změnou měny je nutné vyřešit existující náklady."
     }
   },
@@ -116,9 +126,13 @@
           "name": "EAN kód",
           "description": "Identifikátor odběrného místa."
         },
-        "date_range": {
-          "name": "Období",
-          "description": "Volitelný rozsah datumů ve formátu DD.MM.YYYY - DD.MM.YYYY."
+        "start_date": {
+          "name": "Datum od",
+          "description": "První den pro stažení. Pro načtení včerejška ponechte obě data prázdná."
+        },
+        "end_date": {
+          "name": "Datum do",
+          "description": "Poslední den pro stažení (včetně); maximální rozsah je 60 dní."
         }
       }
     },

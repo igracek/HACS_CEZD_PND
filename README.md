@@ -6,25 +6,14 @@
 
 Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8 a novější**) pro automatické stahování 15minutových a denních naměřených dat z **Portálu Naměřených Dat ČEZ Distribuce (PND)** a jejich přímou integraci do **Home Assistant Energy Dashboardu** formou externích dlouhodobých statistik.
 
-## Verze 1.1.4
+![Logo integrace](custom_components/cez_pnd/brand/logo.png)
 
-Oprava úvodního připojení pro účty, jejichž dashboard neuvádí ELM ani EAN, ale má jedinou sadu zařízení. Integrace v takovém případě zkusí krátký CSV export místo požadavku na nedostupný seznam elektroměrů. Pokud export obsahuje EAN a ELM, musí oba odpovídat zadaným hodnotám; nesoulad konfiguraci zastaví.
+## Novinky ve verzi 1.1.8
 
-Pokud CSV vazbu EAN a ELM nepotvrzuje, zobrazí se samostatné upozornění. Bez výslovného potvrzení uživatele se integrace nepřidá. Potvrzení **není důkaz správného přiřazení dat**: zejména u účtů s více EAN si vazbu ověřte v portálu PND a po přidání zkontrolujte první stažené hodnoty. Běžné účty s identifikátory v dashboardu používají dosavadní postup.
-
-Děkujeme uživateli [@gut1986](https://github.com/gut1986) za podrobný diagnostický log a popis účtu v [issue #2](https://github.com/igracek/HACS_CEZD_PND/issues/2), které umožnily tuto cestu ošetřit.
-
-## Verze 1.1.3
-
-Pro účty s více sadami zařízení a bez ELM v dashboardu přibyla bezpečná diagnostika úvodního připojení. Řádek `dashboard_contract` nyní uvádí počty různých sad zařízení, záznamů s EAN a shod se zadaným EAN; řádek `request_error` rozlišuje kategorii chyby HTTP požadavku. Hodnoty EAN/ELM, obsah odpovědi ani text výjimky se do těchto nových záznamů nezapisují. Přihlašovací a exportní postup se nemění; tato verze ještě neopravuje účty, u nichž portál neumožňuje jednoznačně ověřit elektroměr.
-
-Pokud přidání integrace stále selhává, zapněte ve formuláři **Zapsat bezpečnou diagnostiku při prvním připojení** a v surovém protokolu Home Assistant Core najděte řádky `HTTP debug stage=dashboard_contract`, `HTTP debug stage=request_error` a `HTTP debug stage=initial_verification_failure` ze stejného pokusu. Před vložením do [issue #2](https://github.com/igracek/HACS_CEZD_PND/issues/2) zkontrolujte, zda ve sdíleném úryvku nejsou přihlašovací údaje ani celé EAN/ELM.
-
-## Verze 1.1.2
-
-Oprava připojení účtů, jejichž dashboard PND nevrací `idDeviceSet` nebo jej vrací jako `null`. Integrace v takovém případě může použít již existující export podle ELM, ale pouze po ověření vybraného elektroměru a EAN, pokud jej portál uvádí. Nejednoznačný výběr více elektroměrů zůstává odmítnutý. Zachována je i kompatibilita s účty, kde jsou ELM a jediná sada zařízení ve dvou oddělených záznamech dashboardu.
-
-Děkujeme uživatelům [@gut1986](https://github.com/gut1986), [@MirekHovorka](https://github.com/MirekHovorka) a [@suplere](https://github.com/suplere) za vytrvalé hlášení problému a diagnostické logy v [issue #2](https://github.com/igracek/HACS_CEZD_PND/issues/2). Zvláštní poděkování patří @suplere za lokální návrh opravy a ověření exportu proti datům portálu.
+- Nová statistika celkových nákladů a správcovská akce pro bezpečné doplnění její historie z nákladů VT a NT.
+- Ceny se v nastavení zobrazují podle zapnutí výpočtu a entity HDO: jedna cena bez HDO, dvě ceny s HDO. Při ručním odebrání HDO se nabídne dosavadní cena VT.
+- Staré ceny bez HDO se automaticky sjednotí jen tehdy, když je to jednoznačné; při rozdílných cenách integrace upozorní uživatele a pozastaví nové nákladové zápisy.
+- Nákladové statistiky používají měnu Home Assistantu; ruční stažení dat z PND nabízí výběr dat v kalendáři. Integrace má vlastní logo.
 
 ---
 
@@ -39,7 +28,7 @@ Děkujeme uživatelům [@gut1986](https://github.com/gut1986), [@MirekHovorka](h
 - **Přepočet výkonu na energii a filtrace budoucích dat:** Automatická detekce a přepočet středního výkonu v `[kW]` na energii v `kWh` (faktor $0.25\,\text{h}$ pro 15min intervaly), validace profilů (+A vs -A) a filtrace nenaměřených budoucích dnů (`"neznámá hodnota"`).
 - **Automatické rozlišení VT a NT (Vysoký / Nízký tarif):** Možnost napojení na libovolnou boolean entitu v HA (např. spínání HDO) – integrace zpětně rozdělí spotřebu podle stavu entity v daných intervalech (s bezpečným fallbackem na VT).
 - **Spotřeba od posledního odečtu:** Volitelné datum posledního ročního nebo fakturačního odečtu vytvoří průběžný senzor spotřeby od tohoto dne, včetně samostatných atributů VT a NT.
-- **Náklady podle VT/NT:** Volitelný cenový kalendář počítá samostatné nákladové statistiky VT a NT v měně nastavené v Home Assistantu a podporuje bezpečný zpětný přepočet.
+- **Náklady podle tarifu:** Volitelný cenový kalendář počítá statistiky nákladů VT, NT i jejich součtu v měně nastavené v Home Assistantu a podporuje bezpečné zpětné doplnění.
 - **Konfigurace přes UI (Config Flow, Options Flow & Reauth):** Žádné ruční úpravy YAML souborů. Možnost volby provozního režimu (HTTP / Prohlížeč), správy více odběrných míst (EAN/ELM), bezpečné rotace hesel bez prefillu a ochrana neměnnosti EAN.
 - **Plná podpora ČEZ Single Sign-On:** Podpora SSO domén ČEZ (`pnd.cezdistribuce.cz`, `mepas.cez.cz`, `dip.cezdistribuce.cz`) s přísnou kontrolou originu.
 - **Robustní diagnostický a debugovací subsystém:** Integrovaná nativní platforma diagnostiky Home Assistantu (`diagnostics.py`), opt-in ukládání sanitizovaných DOM HTML dumpů při chybách se striktní anonymizací (redaction) citlivých údajů a auto-pruningem.
@@ -162,22 +151,28 @@ Home Assistantu.
 
 *Poznámka:* Data se v Energy Dashboardu zobrazují zpětně v přesných hodinových UTC intervalech odpovídajících reálnému času spotřeby/dodávky za předchozí dny, aniž by docházelo ke zkreslení aktuálního dne či kolizím s lokálními podružnými měřidly.
 
-### Náklady VT/NT
+### Náklady na elektřinu
 
-V možnostech integrace zapněte **Počítat náklady pro VT/NT** a zadejte cenu
-VT, cenu NT a datum, od kterého platí. Zadávejte variabilní cenu za kWh,
+V možnostech integrace zapněte **Počítat náklady na elektřinu**. Bez entity HDO
+zadáte jednu cenu; s entitou HDO zvlášť cenu VT a NT. Nastavte datum, od kterého
+cena platí. Zadávejte variabilní cenu za kWh,
 ideálně včetně DPH a všech poplatků závislých na spotřebě; stálé měsíční
 platby se nezapočítávají. Měnu integrace automaticky převezme z obecného
 nastavení Home Assistantu.
 
-Integrace vytvoří externí statistiky `cez_pnd:<ean>_cost_vt` a
-`cez_pnd:<ean>_cost_nt`. V panelu Energie je přiřaďte jako nákladové
-statistiky k odpovídající spotřebě VT a NT.
+Integrace vytvoří externí statistiky `cez_pnd:<ean>_cost_vt`,
+`cez_pnd:<ean>_cost_nt` a `cez_pnd:<ean>_cost_total`. V panelu Energie přiřaďte
+nákladové statistiky k odpovídající spotřebě.
 
 Pro zpětný výpočet spusťte akci `cez_pnd.recalculate_costs` nejprve s volbou
 **Pouze náhled**. Po kontrole počtu hodin ji spusťte znovu s vypnutým náhledem.
 Akce používá již uložené statistiky a nepřihlašuje se znovu na PND. Období,
 které není plně pokryté cenovým kalendářem, se nezapíše.
+
+Pro bezpečné doplnění historické statistiky celkových nákladů z již uložených
+nákladů VT a NT použijte správcovskou akci `cez_pnd.rebuild_total_costs`.
+Nejprve ponechte zapnutý náhled (`dry_run`), zkontrolujte výsledek a teprve
+potom spusťte zápis.
 
 Senzor **Intervalová spotřeba** nezobrazuje poslední samostatný 15minutový
 interval. Jde o diskrétní součet všech 15minutových záznamů načtených
@@ -241,9 +236,10 @@ logger:
 
 ## 🛠️ Poskytované služby (Services)
 
-- `cez_pnd.fetch_data`: Spustí okamžité stažení dat. Volitelný parametr `date_range` (např. `"01.08.2026 - 15.08.2026"`, max 60 dní) umožňuje zpětné dočtení historických dat (backfilling).
+- `cez_pnd.fetch_data`: Spustí okamžité stažení dat. Volitelná kalendářová pole `start_date` a `end_date` umožňují zpětné dočtení historie (max. 60 dní). Starší textový parametr `date_range` zůstává pro existující automatizace, ale nelze jej kombinovat s novými poli.
 - `cez_pnd.test_export_scenarios`: Bez zápisu do statistik otestuje dostupné varianty exportu (`idDeviceSet + ELM`, jednoznačný `idDeviceSet`, ověřené ELM). Vrací pouze bezpečné stavové kódy. Pokud je nakonfigurováno více odběrných míst, přijímá parametr `ean`.
 - `cez_pnd.recalculate_costs`: Z uložených statistik VT/NT dopočítá náklady podle cenového kalendáře. Vyžaduje `start_date` a `end_date`; výchozí `dry_run: true` nic nezapisuje. Pouze pro správce.
+- `cez_pnd.rebuild_total_costs`: Doplní historický součet nákladových statistik VT a NT. Vyžaduje `start_date` a `end_date`; výchozí `dry_run: true` nic nezapisuje. Pouze pro správce.
 
 HTTP export nejprve používá dosavadní kombinaci ověřeného `idDeviceSet + ELM`. Při technickém selhání postupně zkusí pouze varianty, jejichž identitu předem ověřil dashboard/meters kontrakt. Pokud PND ELM neposkytuje, je `idDeviceSet` použit jen tehdy, když je v autentizovaném účtu jednoznačný. Neshoda ELM/EAN nebo víceznačný výběr export zastaví, zapíše bezpečný důvod do logu a zobrazí trvalé oznámení v Home Assistantu.
 

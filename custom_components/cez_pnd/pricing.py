@@ -79,6 +79,36 @@ def merge_price_period(
     return normalized
 
 
+def single_tariff_price(price_vt: Any, price_nt: Any) -> str | None:
+    """Resolve legacy prices without silently choosing between conflicting tariffs."""
+    vt = _price_string(price_vt) if price_vt not in (None, "") else "0"
+    nt = _price_string(price_nt) if price_nt not in (None, "") else "0"
+    if vt != "0" and nt != "0" and vt != nt:
+        return None
+    return vt if vt != "0" else nt
+
+
+def migrate_single_tariff_schedule(
+    schedule: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Copy safe legacy periods; return dates requiring an explicit user choice."""
+    normalized = []
+    conflicts = []
+    for raw in schedule:
+        period = dict(raw)
+        try:
+            price = single_tariff_price(raw.get("price_vt"), raw.get("price_nt"))
+        except PriceScheduleError:
+            price = None
+        if price is None:
+            conflicts.append(str(raw.get("valid_from", "unknown")))
+        else:
+            period["price_vt"] = price
+            period["price_nt"] = price
+        normalized.append(period)
+    return normalized, conflicts
+
+
 def price_period_for(
     schedule: Iterable[dict[str, Any]], when: date | datetime
 ) -> dict[str, str] | None:

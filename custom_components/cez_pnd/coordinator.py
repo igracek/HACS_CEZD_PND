@@ -31,6 +31,7 @@ from .client import (
     PndTimeoutError,
 )
 from .http_client import PndHttpClient
+from .pricing import migrate_single_tariff_schedule
 from .const import (
     CONF_BILLING_START_DATE,
     CONF_BROWSER_HEADLESS,
@@ -505,6 +506,29 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             if options.get(CONF_COST_TRACKING, False)
             else []
         )
+        ambiguity_notification_id = f"cez_pnd_price_ambiguity_{entry.entry_id}"
+        if price_schedule and not self.tariff_entity:
+            price_schedule, conflicting_dates = migrate_single_tariff_schedule(price_schedule)
+            if conflicting_dates:
+                _LOGGER.error(
+                    "Cost calculation disabled: one-tariff price schedule has conflicting prices on %s",
+                    ", ".join(conflicting_dates),
+                )
+                persistent_notification.async_create(
+                    hass,
+                    "Účet bez entity HDO má ve starém cenovém kalendáři rozdílné ceny "
+                    "VT a NT od: " + ", ".join(conflicting_dates) + ". Nelze bezpečně "
+                    "zvolit jednu cenu. V možnostech integrace zadejte správnou "
+                    "společnou cenu pro každé uvedené datum; do té doby je zápis "
+                    "nákladů pozastaven.",
+                    title="ČEZ PND: zkontrolujte cenu bez HDO",
+                    notification_id=ambiguity_notification_id,
+                )
+                price_schedule = []
+            else:
+                persistent_notification.async_dismiss(hass, ambiguity_notification_id)
+        else:
+            persistent_notification.async_dismiss(hass, ambiguity_notification_id)
         stored_currency = str(options.get(CONF_PRICE_CURRENCY, "")).upper()
         current_currency = str(getattr(hass.config, "currency", "")).upper()
         currency_notification_id = f"cez_pnd_price_currency_{entry.entry_id}"

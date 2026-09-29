@@ -1,7 +1,9 @@
 """Statistics manager for importing CEZ PND data into Home Assistant Recorder."""
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from functools import partial
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +29,7 @@ from .const import (
     STATISTIC_CONSUMPTION_VT,
     STATISTIC_CONSUMPTION_NT,
     STATISTIC_COST_NT,
+    STATISTIC_COST_TOTAL,
     STATISTIC_COST_VT,
     STATISTIC_PREFIX,
     STATISTIC_PRODUCTION,
@@ -45,6 +48,14 @@ __all__ = [
 ]
 
 REQUIRED_INTERVALS_PER_HOUR = 4
+
+
+@dataclass(frozen=True)
+class _CostQuarter:
+    """Internal quarter used to import an already aggregated hourly cost."""
+
+    start_time: datetime
+    cost: float
 
 
 def _normalize_datetime(dt_val: Any) -> datetime:
@@ -76,10 +87,80 @@ class PndStatisticsManager:
         self.hass = hass
         self.ean = ean
         self.price_schedule = list(price_schedule or [])
+        self._cost_metadata_safe = True
 
     def _get_statistic_id(self, stat_type: str) -> str:
         """Return the formatted statistic ID."""
         return f"{STATISTIC_PREFIX}:{self.ean}_{stat_type}"
+
+    def _cost_currency(self) -> Optional[str]:
+        """Return HA currency only when every configured price uses that currency."""
+        currency = str(getattr(getattr(self.hass, "config", None), "currency", "")).upper()
+        if not self._cost_metadata_safe or not currency or not self.price_schedule:
+            return None
+        if any(str(period.get("currency", "")).upper() != currency for period in self.price_schedule):
+            return None
+        return currency
+
+    async def async_migrate_cost_currency_metadata(self) -> int:
+        """Label existing cost statistics without changing historical amounts."""
+        currency = self._cost_currency()
+        if currency is None:
+            return 0
+
+        statistic_ids = {
+            self._get_statistic_id(key)
+            for key in (STATISTIC_COST_VT, STATISTIC_COST_NT, STATISTIC_COST_TOTAL)
+        }
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import (
+                async_update_statistics_metadata,
+                get_metadata,
+            )
+
+            instance = get_instance(self.hass)
+            metadata = await instance.async_add_executor_job(
+                partial(get_metadata, self.hass, statistic_ids=statistic_ids)
+            )
+            # Preflight every existing stream before scheduling any changes.
+            for statistic_id, (_, item) in metadata.items():
+                if (
+                    statistic_id not in statistic_ids
+                    or item.get("source") != DOMAIN
+                    or item.get("unit_class") is not None
+                    or item.get("unit_of_measurement") not in (None, currency)
+                ):
+                    _LOGGER.warning(
+                        "Cost currency metadata migration skipped for EAN %s: incompatible existing metadata",
+                        mask_ean(self.ean),
+                    )
+                    self._cost_metadata_safe = False
+                    return 0
+            to_update = [
+                statistic_id for statistic_id, (_, item) in metadata.items()
+                if item.get("unit_of_measurement") is None
+            ]
+            for statistic_id in to_update:
+                async_update_statistics_metadata(
+                    self.hass,
+                    statistic_id,
+                    new_unit_class=None,
+                    new_unit_of_measurement=currency,
+                )
+            if to_update:
+                _LOGGER.info(
+                    "Scheduled currency metadata update for %d cost statistics of EAN %s",
+                    len(to_update), mask_ean(self.ean),
+                )
+            return len(to_update)
+        except Exception as err:
+            self._cost_metadata_safe = False
+            _LOGGER.error(
+                "Cost currency metadata migration failed for EAN %s: %s",
+                mask_ean(self.ean), type(err).__name__,
+            )
+            return 0
 
     async def _async_get_baseline_sum(self, statistic_id: str, before_time: datetime) -> float:
         """Fetch cumulative sum from Recorder immediately preceding before_time without 30-day or year 2000 limit."""
@@ -233,7 +314,7 @@ class PndStatisticsManager:
                 stat_id, stat_name, intervals, delta_fn, validity_fn=validity_fn
             )
 
-        if self.price_schedule:
+        if self._cost_currency():
             uncovered = [
                 record
                 for record in intervals
@@ -271,9 +352,114 @@ class PndStatisticsManager:
                         and self._price_period(record) is not None
                     ),
                     unit_class=None,
-                    unit_of_measurement=None,
+                    unit_of_measurement=self._cost_currency(),
                     value_label=self._price_currency(),
                 )
+
+            # Keep the new stream equal to the two published tariff streams at
+            # their four-decimal hourly precision, without changing either one.
+            hourly: Dict[datetime, Dict[str, Any]] = {}
+            for record in intervals:
+                if not record.is_valid_consumption or self._price_period(record) is None:
+                    continue
+                hour = _normalize_datetime(record.start_time).replace(
+                    minute=0, second=0, microsecond=0
+                )
+                bucket = hourly.setdefault(hour, {"count": 0, "vt": 0.0, "nt": 0.0})
+                bucket["count"] += 1
+                bucket["vt" if record.is_vt else "nt"] += self._interval_cost(
+                    record, record.is_vt
+                )
+            total_hourly = {
+                hour: Decimal(str(round(bucket["vt"], 4)))
+                + Decimal(str(round(bucket["nt"], 4)))
+                for hour, bucket in hourly.items()
+                if bucket["count"] == REQUIRED_INTERVALS_PER_HOUR
+            }
+            if total_hourly:
+                await self._async_import_total_cost_hours(total_hourly)
+
+    async def _async_import_total_cost_hours(
+        self, hourly_costs: Dict[datetime, Decimal]
+    ) -> None:
+        """Import paired hourly costs through the established merge/backfill path."""
+        quarters = [
+            _CostQuarter(hour + timedelta(minutes=15 * index), float(cost / 4))
+            for hour, cost in sorted(hourly_costs.items())
+            for index in range(REQUIRED_INTERVALS_PER_HOUR)
+        ]
+        await self._async_import_single_statistic(
+            self._get_statistic_id(STATISTIC_COST_TOTAL),
+            f"ČEZ PND Celkové náklady ({mask_ean(self.ean)})",
+            quarters,
+            lambda record: record.cost,
+            unit_class=None,
+            unit_of_measurement=self._cost_currency(),
+            value_label=self._price_currency(),
+        )
+
+    async def _async_read_cost_hourly_deltas(
+        self, statistic_id: str, start_time: datetime, end_time: datetime
+    ) -> Dict[datetime, Decimal]:
+        """Read source hour deltas, deriving state from sum only when necessary."""
+        points = await self._async_get_existing_statistics(statistic_id, start_time, end_time)
+        previous_sum = Decimal(str(await self._async_get_baseline_sum(statistic_id, start_time)))
+        result: Dict[datetime, Decimal] = {}
+        for point in points:
+            raw_start = point.get("start") if isinstance(point, dict) else getattr(point, "start", None)
+            raw_state = point.get("state") if isinstance(point, dict) else getattr(point, "state", None)
+            raw_sum = point.get("sum") if isinstance(point, dict) else getattr(point, "sum", None)
+            if raw_start is None:
+                raise PndStatisticsError("Cost statistic contains a point without timestamp")
+            hour = _normalize_datetime(raw_start)
+            if hour.minute or hour.second or hour.microsecond or hour in result:
+                raise PndStatisticsError("Cost statistic has an invalid or duplicate hour")
+            if raw_state is None and raw_sum is None:
+                raise PndStatisticsError("Cost statistic contains a point without value")
+            try:
+                delta = (
+                    Decimal(str(raw_state)) if raw_state is not None
+                    else Decimal(str(raw_sum)) - previous_sum
+                )
+                if raw_sum is not None:
+                    previous_sum = Decimal(str(raw_sum))
+                else:
+                    previous_sum += delta
+            except (ArithmeticError, ValueError) as err:
+                raise PndStatisticsError("Cost statistic contains an invalid value") from err
+            if not delta.is_finite() or delta < 0 or not previous_sum.is_finite():
+                raise PndStatisticsError("Cost statistic contains a negative or non-finite value")
+            result[hour] = delta
+        return result
+
+    async def async_rebuild_total_costs(
+        self, start_time: datetime, end_time: datetime, *, dry_run: bool = True
+    ) -> Dict[str, Any]:
+        """Rebuild total cost from existing VT/NT hours, without estimating gaps."""
+        if not self._cost_currency():
+            raise ValueError("Cost tracking and a price schedule must be configured")
+        if end_time <= start_time:
+            raise ValueError("End time must be after start time")
+        vt = await self._async_read_cost_hourly_deltas(
+            self._get_statistic_id(STATISTIC_COST_VT), start_time, end_time
+        )
+        nt = await self._async_read_cost_hourly_deltas(
+            self._get_statistic_id(STATISTIC_COST_NT), start_time, end_time
+        )
+        if not vt or not nt:
+            raise ValueError("No paired VT/NT cost statistics in the requested period")
+        if vt.keys() != nt.keys():
+            raise ValueError("VT/NT cost statistics have unpaired hours; no data was written")
+        total_hours = {hour: vt[hour] + nt[hour] for hour in vt}
+        result = {
+            "status": "preview" if dry_run else "completed",
+            "currency": self._price_currency(),
+            "hours": len(total_hours),
+            "total_cost": float(sum(total_hours.values(), Decimal("0"))),
+        }
+        if not dry_run:
+            await self._async_import_total_cost_hours(total_hours)
+        return result
 
     def _interval_cost(self, record: IntervalRecord, is_vt: bool) -> float:
         """Calculate interval cost using the price effective at its timestamp."""
@@ -307,7 +493,7 @@ class PndStatisticsManager:
         self, start_time: datetime, end_time: datetime, *, dry_run: bool = False
     ) -> Dict[str, Any]:
         """Recalculate cost statistics from existing VT/NT energy statistics."""
-        if not self.price_schedule:
+        if not self._cost_currency():
             raise ValueError("Cost tracking and a price schedule must be configured")
         if end_time <= start_time:
             raise ValueError("End time must be after start time")
@@ -391,7 +577,7 @@ class PndStatisticsManager:
                 lambda record, target=is_vt: self._interval_cost(record, target),
                 validity_fn=lambda record: record.is_valid_consumption,
                 unit_class=None,
-                unit_of_measurement=None,
+                unit_of_measurement=self._cost_currency(),
                 value_label=self._price_currency(),
             )
         return result

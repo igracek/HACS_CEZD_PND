@@ -22,15 +22,18 @@ from .const import (
     DOMAIN,
     SERVICE_FETCH_DATA,
     SERVICE_RECALCULATE_COSTS,
+    SERVICE_REBUILD_TOTAL_COSTS,
     SERVICE_TEST_EXPORT_SCENARIOS,
 )
-from .coordinator import CezPndCoordinator
+from .coordinator import CezPndCoordinator, GLOBAL_BROWSER_SEMAPHORE
 
 _LOGGER = logging.getLogger(__name__)
 
 FETCH_DATA_SCHEMA = vol.Schema({
     vol.Optional(ATTR_EAN): cv.string,
     vol.Optional(ATTR_DATE_RANGE): cv.string,
+    vol.Optional(ATTR_START_DATE): cv.date,
+    vol.Optional(ATTR_END_DATE): cv.date,
 })
 
 RECALCULATE_COSTS_SCHEMA = vol.Schema({
@@ -39,6 +42,8 @@ RECALCULATE_COSTS_SCHEMA = vol.Schema({
     vol.Required(ATTR_END_DATE): cv.date,
     vol.Optional(ATTR_DRY_RUN, default=True): cv.boolean,
 })
+
+REBUILD_TOTAL_COSTS_SCHEMA = RECALCULATE_COSTS_SCHEMA
 
 
 def validate_ean(ean: str) -> None:
@@ -116,8 +121,17 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             validate_ean(target_ean)
         coordinator = _get_coordinator(hass, call)
         date_range = call.data.get(ATTR_DATE_RANGE)
+        start_date: date | None = call.data.get(ATTR_START_DATE)
+        end_date: date | None = call.data.get(ATTR_END_DATE)
 
-        if date_range:
+        if date_range is not None and (start_date is not None or end_date is not None):
+            raise ServiceValidationError("Zadejte buď datum od/do, nebo původní textové období, ne obojí.")
+        if (start_date is None) != (end_date is None):
+            raise ServiceValidationError("Pro vlastní období vyplňte datum od i datum do.")
+        if start_date is not None and end_date is not None:
+            date_range = f"{start_date:%d.%m.%Y} - {end_date:%d.%m.%Y}"
+
+        if date_range is not None:
             validate_date_range(date_range)
             _LOGGER.info("Executing manual fetch_data for EAN %s with custom range '%s'", coordinator.masked_ean, date_range)
             await coordinator.async_fetch_range(date_range)
@@ -157,6 +171,32 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
 
+    async def handle_rebuild_total_costs(call: ServiceCall) -> Dict[str, Any]:
+        """Preview or build total costs from existing paired VT/NT statistics."""
+        coordinator = _get_coordinator(hass, call)
+        start_date: date = call.data[ATTR_START_DATE]
+        end_date: date = call.data[ATTR_END_DATE]
+        if end_date < start_date:
+            raise ServiceValidationError("Datum do nesmí být před datem od.")
+        if (end_date - start_date).days > 3660:
+            raise ServiceValidationError("Rozsah přepočtu nesmí překročit 10 let.")
+        import homeassistant.util.dt as dt_util
+
+        local_tz = dt_util.DEFAULT_TIME_ZONE
+        start_time = datetime.combine(start_date, time.min, local_tz).astimezone(timezone.utc)
+        end_time = datetime.combine(
+            end_date + timedelta(days=1), time.min, local_tz
+        ).astimezone(timezone.utc)
+        async with GLOBAL_BROWSER_SEMAPHORE:
+            if coordinator.is_running:
+                raise ServiceValidationError("Synchronizace PND právě probíhá; zkuste akci později.")
+            try:
+                return await coordinator.stats_manager.async_rebuild_total_costs(
+                    start_time, end_time, dry_run=call.data[ATTR_DRY_RUN]
+                )
+            except ValueError as err:
+                raise ServiceValidationError(str(err)) from err
+
     if not hass.services.has_service(DOMAIN, SERVICE_FETCH_DATA):
         async_register_admin_service(
             hass,
@@ -183,6 +223,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             schema=RECALCULATE_COSTS_SCHEMA,
             supports_response=SupportsResponse.ONLY,
         )
+    if not hass.services.has_service(DOMAIN, SERVICE_REBUILD_TOTAL_COSTS):
+        async_register_admin_service(
+            hass,
+            DOMAIN,
+            SERVICE_REBUILD_TOTAL_COSTS,
+            handle_rebuild_total_costs,
+            schema=REBUILD_TOTAL_COSTS_SCHEMA,
+            supports_response=SupportsResponse.ONLY,
+        )
 
 
 async def async_unload_services(hass: HomeAssistant) -> None:
@@ -203,3 +252,5 @@ async def async_unload_services(hass: HomeAssistant) -> None:
             hass.services.async_remove(DOMAIN, SERVICE_TEST_EXPORT_SCENARIOS)
         if hass.services.has_service(DOMAIN, SERVICE_RECALCULATE_COSTS):
             hass.services.async_remove(DOMAIN, SERVICE_RECALCULATE_COSTS)
+        if hass.services.has_service(DOMAIN, SERVICE_REBUILD_TOTAL_COSTS):
+            hass.services.async_remove(DOMAIN, SERVICE_REBUILD_TOTAL_COSTS)

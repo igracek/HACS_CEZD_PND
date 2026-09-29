@@ -12,7 +12,7 @@
           "client_mode": "Client Mode (Direct HTTP / Browser)",
           "debug_mode": "Log safe diagnostics during initial connection",
           "tariff_entity": "Optional VT/NT Tariff boolean entity (e.g. binary_sensor.hdo)",
-          "billing_start_date": "Optional Billing Period Start Date (YYYY-MM-DD)",
+          "billing_start_date": "Optional Billing Period Start Date",
           "scan_time": "Daily scan time (HH:MM)"
         }
       },
@@ -74,16 +74,26 @@
     "step": {
       "init": {
         "title": "CEZ Distribuce PND Options",
-        "description": "Update synchronization parameters and tariff settings.",
+        "description": "Update synchronization parameters and tariff settings. Enabling cost tracking reveals the price fields; selecting an HDO entity switches between one price and high/low tariff prices.",
         "data": {
           "password": "New Password (leave empty to keep current)",
           "client_mode": "Client Mode (Direct HTTP / Browser)",
           "tariff_entity": "VT/NT Tariff Entity (ON = High, OFF = Low)",
-          "billing_start_date": "Billing Period Start Date (YYYY-MM-DD)",
+          "billing_start_date": "Billing Period Start Date",
           "scan_time": "Daily scan time (HH:MM)",
           "debug_mode": "Enable Debug Mode",
           "debug_dir": "Directory for debug dumps and screenshots",
-          "cost_tracking": "Calculate VT/NT energy costs",
+          "cost_tracking": "Calculate energy costs"
+        },
+        "data_description": {
+          "price_single": "To use separate high and low tariff prices, select an HDO tariff entity."
+        }
+      },
+      "costs": {
+        "title": "Energy price settings",
+        "description": "Set the price and effective date. Without an HDO entity, one price applies to all consumption. To distinguish high and low tariffs, select an HDO entity in the previous step. Conflicting older prices requiring correction: {conflict_dates}.",
+        "data": {
+          "price_single": "Electricity price (including VAT)",
           "price_vt": "High-tariff variable price (including VAT)",
           "price_nt": "Low-tariff variable price (including VAT)",
           "price_valid_from": "Prices valid from"
@@ -103,7 +113,7 @@
       "elm_unavailable": "The PND account does not provide an ELM identifier in a supported field.",
       "service_unavailable": "CEZ PND portal is under maintenance.",
       "cannot_connect": "Failed to connect to CEZ PND portal.",
-      "invalid_price_settings": "Enter valid VT and NT prices and their effective date.",
+      "invalid_price_settings": "Enter valid price(s) and their effective date.",
       "price_currency_mismatch": "The Home Assistant currency differs from the stored price schedule. Existing costs must be handled before changing currency."
     }
   },
@@ -116,9 +126,13 @@
           "name": "EAN code",
           "description": "Identifier of the measurement point."
         },
-        "date_range": {
-          "name": "Date Range",
-          "description": "Optional date range in DD.MM.YYYY - DD.MM.YYYY format."
+        "start_date": {
+          "name": "Start date",
+          "description": "First day to download. Leave both dates empty to refresh yesterday."
+        },
+        "end_date": {
+          "name": "End date",
+          "description": "Last day to download (inclusive); maximum range is 60 days."
         }
       }
     },

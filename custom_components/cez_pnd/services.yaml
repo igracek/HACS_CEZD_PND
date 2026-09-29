@@ -9,13 +9,18 @@ fetch_data:
       example: "859182400123456789"
       selector:
         text:
-    date_range:
-      name: Období
-      description: Volitelný rozsah datumů pro zpětné stažení (formát DD.MM.YYYY - DD.MM.YYYY).
+    start_date:
+      name: Datum od
+      description: První den pro zpětné stažení. Pro běžné načtení včerejška nechte obě data prázdná.
       required: false
-      example: "01.08.2026 - 15.08.2026"
       selector:
-        text:
+        date:
+    end_date:
+      name: Datum do
+      description: Poslední den pro zpětné stažení (včetně); maximální rozsah je 60 dní.
+      required: false
+      selector:
+        date:
 
 test_export_scenarios:
   name: Otestovat scénáře exportu PND
@@ -52,6 +57,34 @@ recalculate_costs:
     dry_run:
       name: Pouze náhled
       description: Pokud je zapnuto, nic se nezapíše a akce vrátí počet nalezených hodin.
+      required: true
+      default: true
+      selector:
+        boolean:
+
+rebuild_total_costs:
+  name: Doplnit celkové náklady
+  description: Ze stávajících hodinových nákladů VT a NT vytvoří samostatnou statistiku celkových nákladů. Hodiny bez obou tarifních záznamů odmítne. Výchozí režim je pouze náhled bez zápisu. Pouze pro správce.
+  fields:
+    ean:
+      name: EAN kód
+      description: Výběr konfigurace při více odběrných místech.
+      required: false
+      selector:
+        text:
+    start_date:
+      name: Datum od
+      required: true
+      selector:
+        date:
+    end_date:
+      name: Datum do
+      required: true
+      selector:
+        date:
+    dry_run:
+      name: Pouze náhled
+      description: Pokud je zapnuto, nic se nezapíše a akce vrátí počet spárovaných hodin a součet nákladů.
       required: true
       default: true
       selector:
