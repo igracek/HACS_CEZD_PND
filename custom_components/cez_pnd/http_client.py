@@ -337,13 +337,37 @@ class PndHttpClient:
                 safe_fields[name] = value if isinstance(value, str) else "unknown"
             elif name == "elm_contract":
                 safe_fields[name] = value if value in ELM_CONTRACT_VALUES else "unknown"
+            elif name == "request_failure":
+                safe_fields[name] = value if value in {
+                    "tls", "proxy", "connection", "invalid_request", "other"
+                } else "unknown"
             elif name in {
                 "bytes", "body_bytes", "body_characters", "item_count",
                 "declared_bytes", "records_with_elm", "records_with_device_set",
+                "distinct_device_sets", "records_with_ean",
+                "records_matching_ean", "matching_ean_device_sets",
             }:
                 safe_fields[name] = value if isinstance(value, int) and value >= 0 else "unknown"
         details = " ".join(f"{key}={value}" for key, value in safe_fields.items())
         _LOGGER.warning("HTTP debug %s", details)
+
+    @staticmethod
+    def _request_failure_category(err: requests.exceptions.RequestException) -> str:
+        """Classify transport errors without recording exception text or URLs."""
+        if isinstance(err, requests.exceptions.SSLError):
+            return "tls"
+        if isinstance(err, requests.exceptions.ProxyError):
+            return "proxy"
+        if isinstance(err, requests.exceptions.ConnectionError):
+            return "connection"
+        if isinstance(err, (
+            requests.exceptions.InvalidURL,
+            requests.exceptions.InvalidSchema,
+            requests.exceptions.MissingSchema,
+            requests.exceptions.InvalidHeader,
+        )):
+            return "invalid_request"
+        return "other"
 
     def _debug_operation_phase(self, phase: str) -> None:
         """Log an allowlisted high-level phase without identifiers or payloads."""
@@ -810,7 +834,11 @@ class PndHttpClient:
                                    exception_type=type(err).__name__)
             raise PndTimeoutError("HTTP request timeout (ERR_TIMEOUT)") from err
         except requests.exceptions.RequestException as err:
-            raise PndPortalError(f"HTTP request error: {self._mask_sensitive(str(err))} (ERR_PORTAL)") from err
+            self._debug_http_event(
+                "request_error", method, url,
+                request_failure=self._request_failure_category(err),
+            )
+            raise PndPortalError("HTTP request error (ERR_PORTAL)") from err
 
     def _login(
         self,
@@ -946,6 +974,20 @@ class PndHttpClient:
                 )
                 normalized = _normalize_dashboard_payload(data)
                 if isinstance(data, list):
+                    device_sets = {
+                        item["idDeviceSet"] for item in data
+                        if item.get("idDeviceSet") is not None
+                    }
+                    records_with_ean = [
+                        item for item in data
+                        if item.get(METER_EAN_FIELD) not in (None, "")
+                    ]
+                    matching_ean_records = [
+                        item for item in records_with_ean
+                        if not isinstance(item[METER_EAN_FIELD], bool)
+                        and isinstance(item[METER_EAN_FIELD], (str, int))
+                        and str(item[METER_EAN_FIELD]).strip() == self.ean
+                    ]
                     contract_fields = {
                         "elm_contract": normalized.get("elmMetadataStatus"),
                         "records_with_elm": len(normalized.get("electrometers", [])),
@@ -953,6 +995,13 @@ class PndHttpClient:
                             1 for item in data
                             if isinstance(item, dict) and item.get("idDeviceSet") is not None
                         ),
+                        "distinct_device_sets": len(device_sets),
+                        "records_with_ean": len(records_with_ean),
+                        "records_matching_ean": len(matching_ean_records),
+                        "matching_ean_device_sets": len({
+                            item["idDeviceSet"] for item in matching_ean_records
+                            if item.get("idDeviceSet") is not None
+                        }),
                     }
                     self._debug_http_event(
                         "dashboard_contract", "GET", response_url,

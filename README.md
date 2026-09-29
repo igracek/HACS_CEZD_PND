@@ -6,6 +6,12 @@
 
 Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8 a novější**) pro automatické stahování 15minutových a denních naměřených dat z **Portálu Naměřených Dat ČEZ Distribuce (PND)** a jejich přímou integraci do **Home Assistant Energy Dashboardu** formou externích dlouhodobých statistik.
 
+## Verze 1.1.3
+
+Pro účty s více sadami zařízení a bez ELM v dashboardu přibyla bezpečná diagnostika úvodního připojení. Řádek `dashboard_contract` nyní uvádí počty různých sad zařízení, záznamů s EAN a shod se zadaným EAN; řádek `request_error` rozlišuje kategorii chyby HTTP požadavku. Hodnoty EAN/ELM, obsah odpovědi ani text výjimky se do těchto nových záznamů nezapisují. Přihlašovací a exportní postup se nemění; tato verze ještě neopravuje účty, u nichž portál neumožňuje jednoznačně ověřit elektroměr.
+
+Pokud přidání integrace stále selhává, zapněte ve formuláři **Zapsat bezpečnou diagnostiku při prvním připojení** a v surovém protokolu Home Assistant Core najděte řádky `HTTP debug stage=dashboard_contract`, `HTTP debug stage=request_error` a `HTTP debug stage=initial_verification_failure` ze stejného pokusu. Před vložením do [issue #2](https://github.com/igracek/HACS_CEZD_PND/issues/2) zkontrolujte, zda ve sdíleném úryvku nejsou přihlašovací údaje ani celé EAN/ELM.
+
 ## Verze 1.1.2
 
 Oprava připojení účtů, jejichž dashboard PND nevrací `idDeviceSet` nebo jej vrací jako `null`. Integrace v takovém případě může použít již existující export podle ELM, ale pouze po ověření vybraného elektroměru a EAN, pokud jej portál uvádí. Nejednoznačný výběr více elektroměrů zůstává odmítnutý. Zachována je i kompatibilita s účty, kde jsou ELM a jediná sada zařízení ve dvou oddělených záznamech dashboardu.
