@@ -35,10 +35,10 @@ ATTESTATION_PATH = ROOT / "deployment/release/advisory-attestation.json"
 OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
 ATTESTATION_SCOPE = "Known vulnerabilities returned by OSV.dev for the exact versions at checked_at"
 BASELINE = {
-    "home_assistant": "2026.8.3",
+    "home_assistant": "2026.10.4",
     "python": "3.14",
     "platform": "linux",
-    "resolved_at": "2026-09-15",
+    "resolved_at": "2026-10-26",
 }
 DIRECT_ROLES = {"integration_direct", "ha_core_provided"}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -47,15 +47,15 @@ EXPECTED_INTEGRATION_ROOTS = {"beautifulsoup4": "4.15.0", "selenium": "4.49.0"}
 EXPECTED_HA_ROOTS = {"requests": "2.34.2"}
 EXPECTED_APPLICATION = {
     "type": "application",
-    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
+    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.1.9",
     "name": "HACS_CEZD_PND",
-    "version": "1.0.4",
-    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
+    "version": "1.1.9",
+    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.1.9",
 }
 EXPECTED_CLOSURE = {
     "attrs": "26.1.0",
     "beautifulsoup4": "4.15.0",
-    "certifi": "2026.7.22",
+    "certifi": "2026.10.23",
     "charset-normalizer": "3.4.3",
     "h11": "0.16.0",
     "idna": "3.19",
@@ -69,15 +69,15 @@ EXPECTED_CLOSURE = {
     "trio": "0.34.0",
     "trio-websocket": "0.12.2",
     "typing-extensions": "4.16.0",
-    "urllib3": "2.7.0",
+    "urllib3": "2.8.0",
     "websocket-client": "1.9.2",
     "wsproto": "1.3.2",
 }
 HA_PROVENANCE = {
     "repository": "https://github.com/home-assistant/core",
-    "commit": "759e4658f40b3ccb671d418b8a0ed95224bf4561",
-    "pyproject_sha256": "2618b6f740c5f55e48eeb2204661f841ea53ff9bf99edd0632879b0edf693642",
-    "constraints_sha256": "94db4ee9d7731452e9479e96e72777454ccf69c0ec6a5a0742da330eaa7b7a42",
+    "commit": "357cae5c598dfcd7a0ea7dc5b1facccd4ec6037b",
+    "pyproject_sha256": "b147a463d15b85f1dbaeb054adb1512a85baec51fc8d8d20f704662a04be0a35",
+    "constraints_sha256": "7260404c34adcc5aac1fb4e7384f989292cfce0e30e3a7a46e18383f34a8059f",
 }
 
 

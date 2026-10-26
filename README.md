@@ -1,10 +1,10 @@
 # ČEZ Distribuce PND - HACS Home Assistant Integrace
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/default)
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.8%2B-blue.svg)](https://home-assistant.io)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.10.4%2B-blue.svg)](https://home-assistant.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8 a novější**) pro automatické stahování 15minutových a denních naměřených dat z **Portálu Naměřených Dat ČEZ Distribuce (PND)** a jejich přímou integraci do **Home Assistant Energy Dashboardu** formou externích dlouhodobých statistik.
+Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.10.4 a novější**) pro automatické stahování 15minutových a denních naměřených dat z **Portálu Naměřených Dat ČEZ Distribuce (PND)** a jejich přímou integraci do **Home Assistant Energy Dashboardu** formou externích dlouhodobých statistik.
 
 ![Logo integrace](custom_components/cez_pnd/brand/logo.png)
 
@@ -27,7 +27,7 @@ Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8
 - **Dva provozní režimy stahování dat:**
   - **Režim přímého HTTP (Doporučeno / Browserless):** Čisté, rychlé a lehké stahování dat přímo přes HTTP dotazy a ČEZ SSO bez nutnosti instalovat Chromium nebo Selenium webdriver. Nulové nároky na RAM.
   - **Režim prohlížeče (Headless Browser):** Automatizace přes headless Chromium nebo Firefox s ochranou paměti (limit V8 heap 256 MB, seccomp sandbox) a procesním semaforem.
-- **Plná podpora Home Assistant Energy Dashboardu (HA 2026.8+):** 15minutové historické profily spotřeby (+A) a dodávky/výroby (-A) jsou importovány přes moderní API `async_add_external_statistics` do externích dlouhodobých statistik (`cez_pnd:<ean>_*`) s hodinovou UTC agregací a monotónně rostoucími kumulativními součty (`sum`).
+- **Plná podpora Home Assistant Energy Dashboardu (HA 2026.10.4+):** 15minutové historické profily spotřeby (+A) a dodávky/výroby (-A) jsou importovány přes moderní API `async_add_external_statistics` do externích dlouhodobých statistik (`cez_pnd:<ean>_*`) s hodinovou UTC agregací a monotónně rostoucími kumulativními součty (`sum`).
 - **Podpora sestav 01 (+A), 02 (-A), 08 (-A) a 17 (+E, -E):** Automatické stahování a parsování 15minutových profilů `01 Profil spotřeby (+A)` a `02 Profil výroby (-A)` (s fallbackem na `07` a `08`), denních souhrnů a podpora sestavy `17 Registry za den (+E, -E)` pro kontrolu a kalibraci tarifních registrů VT/NT.
 - **Robustní podpora pro čistě odběrná místa i FVE:** Plná tolerance pro odběrná místa bez fotovoltaiky (výroba se automaticky nastaví na 0.0 kWh bez chybových stavů synchronizace).
 - **Přepočet výkonu na energii a filtrace budoucích dat:** Automatická detekce a přepočet středního výkonu v `[kW]` na energii v `kWh` (faktor $0.25\,\text{h}$ pro 15min intervaly), validace profilů (+A vs -A) a filtrace nenaměřených budoucích dnů (`"neznámá hodnota"`).
@@ -54,12 +54,12 @@ Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8
 
 Pro spolehlivý běh integrace jsou vyžadovány:
 
-- **Home Assistant Core:** `2026.8.0+`
-- **Python:** `3.12+` / `3.14+`
+- **Home Assistant Core:** `2026.10.4+` (konzervativní otestované minimum; starší verze nejsou bezpečnostně kvalifikovány).
+- **Python:** `3.14.2+` (podle HA Core 2026.10.4)
 - **Python knihovny vlastněné integrací (spravováno v manifest.json):**
   - `beautifulsoup4==4.15.0`
   - `selenium==4.49.0` (pouze pro režim prohlížeče)
-- **Knihovna poskytovaná HA Core 2026.8.3:** `requests==2.34.2` (integrace ji podle pravidel HA znovu nedeklaruje).
+- **Knihovna poskytovaná HA Core 2026.10.4:** `requests==2.34.2` (integrace ji podle pravidel HA znovu nedeklaruje).
 - **Volitelně pro režim prohlížeče (Chromium / Firefox):**
   - **Chromium / Google Chrome** a odpovídající **ChromeDriver** *(doporučeno)*
   - **Mozilla Firefox** a **Geckodriver**

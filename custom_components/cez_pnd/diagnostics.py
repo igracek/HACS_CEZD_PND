@@ -55,15 +55,15 @@ _SBOM_ROLES = {
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _HISTORICAL_SNAPSHOT_APPLICATION = {
     "type": "application",
-    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
+    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.1.9",
     "name": "HACS_CEZD_PND",
-    "version": "1.0.4",
-    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
+    "version": "1.1.9",
+    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.1.9",
 }
 _EXPECTED_SBOM_CLOSURE = {
     "attrs": ("26.1.0", "shared_with_ha_core"),
     "beautifulsoup4": ("4.15.0", "integration_direct"),
-    "certifi": ("2026.7.22", "shared_with_ha_core"),
+    "certifi": ("2026.10.23", "shared_with_ha_core"),
     "charset-normalizer": ("3.4.3", "shared_with_ha_core"),
     "h11": ("0.16.0", "integration_transitive"),
     "idna": ("3.19", "shared_with_ha_core"),
@@ -77,7 +77,7 @@ _EXPECTED_SBOM_CLOSURE = {
     "trio": ("0.34.0", "integration_transitive"),
     "trio-websocket": ("0.12.2", "integration_transitive"),
     "typing-extensions": ("4.16.0", "shared_with_ha_core"),
-    "urllib3": ("2.7.0", "shared_with_ha_core"),
+    "urllib3": ("2.8.0", "shared_with_ha_core"),
     "websocket-client": ("1.9.2", "integration_transitive"),
     "wsproto": ("1.3.2", "integration_transitive"),
 }

@@ -1,23 +1,23 @@
 {
   "artifacts": {
-    "lock_sha256": "e6c0da54a0a461e36676d6b13e12b388400210778cb5747b997ec7eae2a30818",
+    "lock_sha256": "268958ec5cfd32b59f38cc5dbedb10403d50ad81c0ec9b60c09a886c07104d38",
     "manifest_sha256": "44bde5a694230a13f4ed7aff84ae7440edf959b530d1759125f896880e1736d3",
-    "sbom_sha256": "b5c187a16190b02a9b9486d1ee3a8ba3adb03c1a47c1a2559dcacfdf67a96f35"
+    "sbom_sha256": "2f77471747004dfed0c1c86a9970d9c783d94e5ca5964bcad35d6e07d331a9f9"
   },
   "baseline": {
-    "home_assistant": "2026.8.3",
+    "home_assistant": "2026.10.4",
     "platform": "linux",
     "python": "3.14",
-    "resolved_at": "2026-09-15"
+    "resolved_at": "2026-10-26"
   },
-  "checked_at": "2026-09-21T19:38:01Z",
+  "checked_at": "2026-10-26T19:29:31Z",
   "database": "OSV.dev",
   "database_endpoint": "https://api.osv.dev/v1/querybatch",
   "future_safety_guarantee": false,
   "home_assistant_provenance": {
-    "commit": "759e4658f40b3ccb671d418b8a0ed95224bf4561",
-    "constraints_sha256": "94db4ee9d7731452e9479e96e72777454ccf69c0ec6a5a0742da330eaa7b7a42",
-    "pyproject_sha256": "2618b6f740c5f55e48eeb2204661f841ea53ff9bf99edd0632879b0edf693642",
+    "commit": "357cae5c598dfcd7a0ea7dc5b1facccd4ec6037b",
+    "constraints_sha256": "7260404c34adcc5aac1fb4e7384f989292cfce0e30e3a7a46e18383f34a8059f",
+    "pyproject_sha256": "b147a463d15b85f1dbaeb054adb1512a85baec51fc8d8d20f704662a04be0a35",
     "repository": "https://github.com/home-assistant/core"
   },
   "known_vulnerability_ids": [],
@@ -34,8 +34,8 @@
     },
     {
       "name": "certifi",
-      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
-      "version": "2026.7.22"
+      "sha256": "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
+      "version": "2026.10.23"
     },
     {
       "name": "charset-normalizer",
@@ -104,8 +104,8 @@
     },
     {
       "name": "urllib3",
-      "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897",
-      "version": "2.7.0"
+      "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+      "version": "2.8.0"
     },
     {
       "name": "websocket-client",
