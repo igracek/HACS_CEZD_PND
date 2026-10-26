@@ -2,6 +2,7 @@
 import csv
 from datetime import datetime, timedelta
 from enum import Enum
+from itertools import groupby
 import logging
 import math
 import os
@@ -17,6 +18,52 @@ from .fd_security import (
     verify_sealed_fd,
 )
 from .models import DailySummary, IntervalRecord, ParsedPndData
+from .coverage import QUARTER, ZONE, day_grid, utc_end
+
+
+def _resolve_interval_times(rows, date_column, status_column, report_type):
+    """Resolve END labels before deduplication; never infer a fold by value.
+
+    Ambiguous exports require the complete ordered physical-day grid. Partial
+    or reordered fold days have no proven identity and must fail closed.
+    Other days may remain partial, retaining original invalid durations.
+    """
+    times = []
+    days = {}
+    for row in rows:
+        if len(row) <= date_column:
+            raise PndParseError("Chybějící datum intervalu.")
+        start, end = parse_cez_datetime(row[date_column])
+        days.setdefault(start.date(), []).append(len(times))
+        times.append((start, end))
+    resolved = list(times)
+    for day, indices in days.items():
+        if any(utc_end(times[i][1]) is None for i in indices):
+            if status_column is not None and all(
+                len(rows[i]) > status_column
+                and resolve_status_semantic(rows[i][status_column], report_type)
+                == StatusSemantic.PLACEHOLDER
+                for i in indices
+            ):
+                # No measured identity to resolve. Keep naive labels as unknown
+                # coverage evidence, including ambiguity; never invent a fold.
+                continue
+            expected = [start + QUARTER for start in sorted(day_grid(day))]
+            groups = [list(group) for _, group in groupby(indices, key=lambda i: times[i][1])]
+            actual = [times[group[0]][1] for group in groups]
+            labels = [end.astimezone(ZONE).replace(tzinfo=None) for end in expected]
+            if actual != labels or any(times[i][1]-times[i][0] != QUARTER for i in indices):
+                raise PndParseError("Nejednoznačné nebo neuspořádané DST intervaly.")
+            for group, end in zip(groups, expected):
+                for i in group:
+                    resolved[i] = (end-QUARTER, end)
+        else:
+            for i in indices:
+                start, end = times[i]
+                utc = utc_end(end)
+                # Keep date-only/invalid-duration evidence for coverage guards.
+                resolved[i] = (utc-(end-start), utc)
+    return iter(resolved)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -274,6 +321,7 @@ class PndCsvParser:
         self.detected_encoding = "unknown"
         self.invalid_rows_count = 0
         self.duplicate_rows_count = 0
+        self.raw_slots = {}
         self.total_rows_parsed = 0
 
     def _stream_csv_rows(self, file_path: Union[str, SealedReport]) -> Iterator[List[str]]:
@@ -598,7 +646,14 @@ class PndCsvParser:
             file_path.logical_name if isinstance(file_path, SealedReport) else file_path
         )
         results: Dict[datetime, Tuple[datetime, float, bool]] = {}
-        row_stream = self._stream_csv_rows(file_path)
+        slots = self.raw_slots.setdefault(expected_profile, [])
+        row_stream = list(self._stream_csv_rows(file_path))
+        resolved_times: Iterator[Tuple[datetime, datetime]] = iter(())
+        report_type = (
+            REPORT_TYPE_INTERVAL_PRODUCTION
+            if expected_profile == "-A"
+            else REPORT_TYPE_INTERVAL_CONSUMPTION
+        )
 
         date_col_idx = 0
         value_col_idx = 1
@@ -616,6 +671,9 @@ class PndCsvParser:
                     self._resolve_column_indices_and_scale(
                         row, basename, expected_profile=expected_profile
                     )
+                )
+                resolved_times = _resolve_interval_times(
+                    row_stream[1:], date_col_idx, status_col_idx, report_type
                 )
                 continue
 
@@ -640,14 +698,11 @@ class PndCsvParser:
                 else ""
             )
 
-            report_type = (
-                REPORT_TYPE_INTERVAL_PRODUCTION
-                if expected_profile == "-A"
-                else REPORT_TYPE_INTERVAL_CONSUMPTION
-            )
             semantic = resolve_status_semantic(raw_status, report_type=report_type)
 
             # Skip placeholder intervals that have not been measured yet (e.g. future days in monthly range, N/A)
+            slot_start, slot_end = next(resolved_times)
+            slots.append((slot_start, slot_end, semantic.value))
             if semantic == StatusSemantic.PLACEHOLDER:
                 _LOGGER.debug(
                     "Interval %s v %s má stav neměřené hodnoty '%s', přeskočeno",
@@ -678,7 +733,7 @@ class PndCsvParser:
                 )
                 raise PndParseError(f"Neznámý nebo nepodporovaný stav validity '{raw_status}' v souboru '{basename}'.")
 
-            start_time, end_time = parse_cez_datetime(date_str)
+            start_time, end_time = slot_start, slot_end
             raw_val = parse_float_value(val_str)
             value_kwh = round(raw_val * unit_scale, 6)
 
@@ -842,6 +897,7 @@ class PndCsvParser:
         report_paths: Optional[Dict[str, Union[str, SealedReport]]] = None,
     ) -> ParsedPndData:
         """Parse reports and always release process-local browser report ownership."""
+        self.raw_slots = {}
         owned = [value for value in (report_paths or {}).values() if isinstance(value, SealedReport)]
         seen_ids: Set[int] = set()
         seen_inodes: Set[Tuple[int, int]] = set()
@@ -923,7 +979,7 @@ class PndCsvParser:
 
         # Parse intervals with profile validation
         cons_intervals = self._parse_interval_file(consumption_file, expected_profile="+A")
-        if not cons_intervals:
+        if not cons_intervals and not self.raw_slots.get("+A"):
             raise PndParseError("No valid consumption interval records found (ERR_PARSER)")
 
         try:
@@ -947,7 +1003,7 @@ class PndCsvParser:
                 _, prod_kwh, is_valid_prod = prod_intervals[st]
             else:
                 prod_kwh = 0.0
-                is_valid_prod = True
+                is_valid_prod = False
 
             # Combined validity: True if and only if all present streams are valid
             combined_is_valid = is_valid_cons and is_valid_prod
@@ -987,7 +1043,7 @@ class PndCsvParser:
             summary_date = daily_cons[0]
             total_consumption = daily_cons[1]
         elif interval_records:
-            summary_date = interval_records[0].start_time
+            summary_date = interval_records[0].start_time.astimezone(ZONE)
             total_consumption = sum(r.consumption_kwh for r in interval_records if r.is_valid_consumption)
 
         if daily_prod:
@@ -1018,6 +1074,7 @@ class PndCsvParser:
             _LOGGER.debug("Parsed %d 15-minute intervals successfully from %s", num_intervals, target_name)
 
         return ParsedPndData(
+            raw_slots=self.raw_slots,
             intervals=interval_records,
             daily_summary=daily_summary,
             detected_encoding=self.detected_encoding,

@@ -62,7 +62,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-    schedule_configured = False
     platforms_forwarded = False
 
     try:
@@ -74,7 +73,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_config_entry_first_refresh()
 
         coordinator.setup_daily_schedule()
-        schedule_configured = True
 
         platforms_forwarded = True
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -102,9 +100,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except Exception as unload_err:
                     _LOGGER.debug("Error during rollback unloading platforms: %s", unload_err)
 
-        # 3. Cancel schedule if it was configured.
-        if schedule_configured:
-            coordinator.cancel_schedule()
+        # 3. Initial refresh may restore a retry before daily setup is reached.
+        coordinator.cancel_schedule()
 
         # 4. Remove coordinator registration and clear runtime_data.
         if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:

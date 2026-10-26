@@ -229,8 +229,9 @@ class PndScraperClient:
                 config.get("enable_network_capture", config.get(CONF_ENABLE_NETWORK_CAPTURE, DEFAULT_ENABLE_NETWORK_CAPTURE))
             ) or bool(self.debug_mode)
         self.last_debug_artifacts: List[str] = []
+        self.browser_configuration_verified: bool = False
         self.effective_sandbox_verified: bool = False
-        self.effective_sandbox_mode: str = "enforced_least_privilege"
+        self.effective_sandbox_mode: str = "runtime_unverified"
 
     def _mask_sensitive(self, text: str) -> str:
         """Mask password, username, identifiers, tokens, URLs, and filesystem paths."""
@@ -394,11 +395,17 @@ class PndScraperClient:
             sanitized_dict: Dict[str, Any] = {}
             for k, v in data.items():
                 k_lower = str(k).lower()
+                normalized_key = re.sub(r"[^a-z0-9]", "", k_lower)
                 if k_lower in ("authorization", "proxy-authorization", "x-auth-token"):
                     sanitized_dict[k] = "[REDACTED]"
                 elif k_lower in ("cookie", "set-cookie"):
                     sanitized_dict[k] = self._sanitize_cookie_header(str(v))
-                elif k_lower in ("password", "passwd", "pwd", "pass", "heslo", "secret", "client_secret"):
+                elif normalized_key in (
+                    "password", "passwd", "pwd", "pass", "heslo", "secret",
+                    "clientsecret", "apikey", "token", "accesstoken", "refreshtoken",
+                    "idtoken", "authtoken", "sessionid", "jsessionid", "ticket",
+                    "samlresponse", "assertion", "code",
+                ) or normalized_key.endswith(("token", "secret")):
                     sanitized_dict[k] = "[REDACTED]"
                 else:
                     sanitized_dict[k] = self._sanitize_network_data(v)
@@ -406,6 +413,52 @@ class PndScraperClient:
         elif isinstance(data, list):
             return [self._sanitize_network_data(item) for item in data]
         return data
+
+    def _network_metadata(self, params: Any) -> Dict[str, Any]:
+        """Allow only diagnostic metadata; never persist arbitrary CDP payloads.
+
+        Bodies (including Base64 postDataEntries), initiators, cookies and
+        unknown extension fields are deliberately excluded before both copies.
+        """
+        if not isinstance(params, dict):
+            return {}
+        numeric = {"timestamp", "wallTime", "status", "encodedDataLength"}
+        text = {"requestId", "method", "statusText", "mimeType", "protocol", "type"}
+        boolean = {"canceled", "fromDiskCache", "fromServiceWorker"}
+        result: Dict[str, Any] = {}
+        for key, value in params.items():
+            if key in numeric and type(value) in (int, float):
+                result[key] = value
+            elif key in text and isinstance(value, str):
+                result[key] = self._sanitize_network_string(value)
+            elif key in boolean and isinstance(value, bool):
+                result[key] = value
+            elif key == "url" and isinstance(value, str):
+                try:
+                    url = urlsplit(value)
+                    if url.scheme in ("http", "https") and url.hostname:
+                        # Query, userinfo and fragment can carry arbitrary credentials.
+                        host = url.hostname
+                        if ":" in host:
+                            host = f"[{host}]"
+                        if url.port:
+                            host += f":{url.port}"
+                        result[key] = self._sanitize_network_string(
+                            f"{url.scheme}://{host}{url.path}"
+                        )
+                except ValueError:
+                    pass
+            elif key in ("request", "response", "redirectResponse"):
+                result[key] = self._network_metadata(value)
+            elif key == "headers" and isinstance(value, dict):
+                # Custom headers can contain opaque tokens with arbitrary names.
+                result[key] = {
+                    name: self._sanitize_network_string(header)
+                    for name, header in value.items()
+                    if str(name).lower() in ("content-type", "content-length", "cache-control")
+                    and isinstance(header, str)
+                }
+        return result
 
     def _capture_network_traffic(
         self,
@@ -438,7 +491,7 @@ class PndScraperClient:
                 entry_obj = json.loads(message_str)
                 cdp_msg = entry_obj.get("message", entry_obj)
                 method = cdp_msg.get("method", "")
-                params = cdp_msg.get("params", {})
+                params = self._network_metadata(cdp_msg.get("params", {}))
 
                 if method not in (
                     "Network.requestWillBeSent",
@@ -451,7 +504,7 @@ class PndScraperClient:
                 cdp_events.append({
                     "method": method,
                     "params": params,
-                    "timestamp": entry.get("timestamp"),
+                    "timestamp": entry.get("timestamp") if type(entry.get("timestamp")) in (int, float) else None,
                 })
 
                 req_id = params.get("requestId")
@@ -464,7 +517,6 @@ class PndScraperClient:
                         "url": "",
                         "method": "",
                         "request_headers": {},
-                        "post_data": None,
                         "redirect_chain": [],
                         "response": None,
                         "status": "pending",
@@ -477,10 +529,6 @@ class PndScraperClient:
                     req_item["url"] = req.get("url", "")
                     req_item["method"] = req.get("method", "")
                     req_item["request_headers"] = req.get("headers", {})
-                    if "postData" in req:
-                        req_item["post_data"] = req.get("postData")
-                    elif "postDataEntries" in req:
-                        req_item["post_data"] = req.get("postDataEntries")
 
                     redirect_resp = params.get("redirectResponse")
                     if redirect_resp:
@@ -755,6 +803,9 @@ class PndScraperClient:
 
     def _verify_effective_browser_security(self, driver: Any = None, proc: Optional[Any] = None) -> None:
         """Verify effective command line, capabilities and runtime environment fail-closed against sandbox-disabling flags (SEC10-03)."""
+        self.browser_configuration_verified = False
+        self.effective_sandbox_verified = False
+        self.effective_sandbox_mode = "runtime_unverified"
         disallowed = DISALLOWED_BROWSER_FLAGS
 
         # 1. Inspect environment variables
@@ -868,8 +919,10 @@ class PndScraperClient:
                             if isinstance(pe, PndInsecureBrowserError):
                                 raise
 
-        self.effective_sandbox_verified = True
-        self.effective_sandbox_mode = "enforced_least_privilege"
+        # Flag checks are configuration validation, not kernel sandbox attestation.
+        self.browser_configuration_verified = True
+        self.effective_sandbox_verified = False
+        self.effective_sandbox_mode = "runtime_unverified"
 
     def _init_driver(self, download_dir: str) -> Any:
         """Initialize headless Chrome or Firefox WebDriver."""

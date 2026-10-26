@@ -4,6 +4,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from .models import IntervalRecord
+from .coverage import utc_end
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -152,17 +153,20 @@ class TariffEvaluator:
             if last_updated is None:
                 last_updated = getattr(s, "last_changed", None)
 
-            # If last_updated is timezone-aware and intervals are naive, normalize
-            if isinstance(last_updated, datetime) and last_updated.tzinfo is not None:
-                last_updated = last_updated.astimezone().replace(tzinfo=None)
+            if isinstance(last_updated, datetime):
+                last_updated = utc_end(last_updated)
+                if last_updated is None:
+                    raise ValueError("Ambiguous tariff history timestamp")
 
             parsed_states.append((last_updated, state_val))
 
-        parsed_states.sort(key=lambda x: x[0] if x[0] else datetime.min)
+        parsed_states.sort(key=lambda x: x[0] if x[0] else datetime.min.replace(tzinfo=timezone.utc))
 
         for record in intervals:
-            st = record.start_time
-            et = record.end_time
+            st = utc_end(record.start_time)
+            et = utc_end(record.end_time)
+            if st is None or et is None:
+                raise ValueError("Ambiguous tariff interval timestamp")
             interval_duration = (et - st).total_seconds()
             if interval_duration <= 0:
                 record.is_vt = True

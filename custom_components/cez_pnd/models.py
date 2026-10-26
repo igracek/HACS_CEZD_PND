@@ -46,6 +46,8 @@ class ParsedPndData:
     total_rows: int = 0
     invalid_rows_count: int = 0
     duplicate_rows_count: int = 0
+    coverage: dict = field(default_factory=dict)
+    raw_slots: dict = field(default_factory=dict, repr=False)
 
 
 @dataclass
@@ -60,3 +62,6 @@ class SyncResult:
     error_code: Optional[str] = None
     records_count: int = 0
     debug_artifacts_created: List[str] = field(default_factory=list)
+    target_dates: List[str] = field(default_factory=list)
+    coverage: dict = field(default_factory=dict)
+    import_summary: dict = field(default_factory=dict)

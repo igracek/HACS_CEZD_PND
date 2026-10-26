@@ -105,5 +105,10 @@ class CezPndBinarySensor(CoordinatorEntity[CezPndCoordinator], BinarySensorEntit
                 attrs["error_code"] = res.error_code
             attrs["last_duration_seconds"] = res.duration_seconds
             attrs["records_count"] = res.records_count
+            attrs["target_dates"] = res.target_dates
+            attrs["coverage"] = res.coverage
+            attrs["statistics_submitted"] = res.import_summary
+            attrs["pending_dates"] = self.coordinator.pending_dates
+            attrs["expired_dates"] = self.coordinator.expired_dates
 
         return attrs

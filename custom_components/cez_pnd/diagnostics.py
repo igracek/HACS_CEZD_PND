@@ -53,7 +53,7 @@ _SBOM_ROLES = {
     "shared_with_ha_core",
 }
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_EXPECTED_APPLICATION = {
+_HISTORICAL_SNAPSHOT_APPLICATION = {
     "type": "application",
     "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.0.4",
     "name": "HACS_CEZD_PND",
@@ -194,10 +194,10 @@ def _attest_dependencies_and_sbom(
 
     metadata_component = sbom_data.get("metadata", {}).get("component", {})
     if not isinstance(metadata_component, dict) or any(
-        metadata_component.get(key) != value for key, value in _EXPECTED_APPLICATION.items()
+        metadata_component.get(key) != value for key, value in _HISTORICAL_SNAPSHOT_APPLICATION.items()
     ):
         invalid_sbom = True
-    app_ref = _EXPECTED_APPLICATION["bom-ref"]
+    app_ref = _HISTORICAL_SNAPSHOT_APPLICATION["bom-ref"]
     component_refs = {component.get("bom-ref") for component in components_map.values()}
     dependencies = sbom_data.get("dependencies")
     graph: dict[str, set[str]] = {}
@@ -315,7 +315,20 @@ def _attest_dependencies_and_sbom(
     else:
         overall_status = "release_baseline_match"
 
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "manifest.json"), encoding="utf-8") as manifest_file:
+            current_version = json.load(manifest_file).get("version", "unknown")
+    except (OSError, ValueError, TypeError):
+        current_version = "unknown"
+
     return {
+        "application_identity": {"name": "HACS_CEZD_PND", "version": current_version, "source": "manifest.json"},
+        "sbom_application_snapshot": {
+            "name": metadata_component.get("name", "unknown") if isinstance(metadata_component, dict) else "unknown",
+            "version": metadata_component.get("version", "unknown") if isinstance(metadata_component, dict) else "unknown",
+            "semantics": "historical_dependency_snapshot_only",
+            "matches_current_application": isinstance(metadata_component, dict) and metadata_component.get("version") == current_version,
+        },
         "sbom_present": sbom_present,
         "sbom_format": sbom_data.get("bomFormat", "unknown"),
         "sbom_spec_version": sbom_data.get("specVersion", "unknown"),
@@ -400,9 +413,11 @@ def _collect_fs_diagnostics(
         "selenium_version": selenium_ver,
         "beautifulsoup4_version": bs4_ver,
         "python_version": platform.python_version(),
-        "seccomp_filter_sandbox_enforced": not disallowed_found,
+        "browser_configuration_status": "disallowed_flags_detected" if disallowed_found else "no_disallowed_flags_detected",
+        "sandbox_runtime_attestation": "unverified",
+        "seccomp_filter_sandbox_enforced": None,
         "disallowed_flags_detected": detected_disallowed,
-        "effective_sandbox_mode": "enforced_least_privilege" if not disallowed_found else "degraded_insecure",
+        "effective_sandbox_mode": "runtime_unverified",
         "sbom_present": sbom_attestation["sbom_present"],
         "sbom_attestation_status": sbom_attestation["attestation_status"],
         "sbom_sha256": sbom_attestation["sbom_sha256"],

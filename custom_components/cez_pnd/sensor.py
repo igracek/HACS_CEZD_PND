@@ -132,14 +132,14 @@ class CezPndSensor(CoordinatorEntity[CezPndCoordinator], SensorEntity):
         if key == "yesterday_consumption":
             if res.daily_summary:
                 return res.daily_summary.total_consumption_kwh
-            if res.intervals:
+            if res.intervals and res.status == "OK":
                 return round(sum(r.consumption_kwh for r in res.intervals), 4)
             return None
 
         if key == "yesterday_production":
             if res.daily_summary:
                 return res.daily_summary.total_production_kwh
-            if res.intervals:
+            if res.intervals and res.status == "OK":
                 return round(sum(r.production_kwh for r in res.intervals), 4)
             return None
 

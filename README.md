@@ -8,6 +8,11 @@ Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.8
 
 ![Logo integrace](custom_components/cez_pnd/brand/logo.png)
 
+## Novinky ve verzi 1.1.9
+
+- Oprava časové identity intervalů při změně letního a zimního času: koncové značky se rozlišují před deduplikací a hodinové statistiky zachovávají UTC identitu.
+- Neúplné nebo neuspořádané podzimní profily s nejednoznačným časem se bezpečně odmítnou; ceny používají české kalendářní datum.
+
 ## Novinky ve verzi 1.1.8
 
 - Nová statistika celkových nákladů a správcovská akce pro bezpečné doplnění její historie z nákladů VT a NT.

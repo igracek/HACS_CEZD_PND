@@ -271,12 +271,10 @@ class PndStatisticsManager:
                 f"Chyba při dotazu na existující statistiky pro {statistic_id}: {type(err).__name__}"
             ) from err
 
-    async def async_import(self, parsed_data: ParsedPndData) -> None:
+    async def async_import(self, parsed_data: ParsedPndData) -> dict:
         """Import all parsed interval records into HA Recorder statistics."""
-        if not parsed_data.intervals:
-            _LOGGER.debug("No interval records to import into statistics for EAN %s", mask_ean(self.ean))
-            return
-
+        summary = {}
+        expected = sum(p["+A"]["expected"] // 4 for p in parsed_data.coverage.values())
         intervals = sorted(parsed_data.intervals, key=lambda r: r.start_time)
         masked = mask_ean(self.ean)
 
@@ -310,7 +308,7 @@ class PndStatisticsManager:
 
         for stat_key, stat_name, delta_fn, validity_fn in stat_configs:
             stat_id = self._get_statistic_id(stat_key)
-            await self._async_import_single_statistic(
+            summary[stat_key] = await self._async_import_single_statistic(
                 stat_id, stat_name, intervals, delta_fn, validity_fn=validity_fn
             )
 
@@ -342,7 +340,7 @@ class PndStatisticsManager:
             ]
             for stat_key, stat_name, is_vt in cost_configs:
                 stat_id = self._get_statistic_id(stat_key)
-                await self._async_import_single_statistic(
+                summary[stat_key] = await self._async_import_single_statistic(
                     stat_id,
                     stat_name,
                     intervals,
@@ -365,7 +363,13 @@ class PndStatisticsManager:
                 hour = _normalize_datetime(record.start_time).replace(
                     minute=0, second=0, microsecond=0
                 )
-                bucket = hourly.setdefault(hour, {"count": 0, "vt": 0.0, "nt": 0.0})
+                bucket = hourly.setdefault(hour, {"count": 0, "vt": 0.0, "nt": 0.0, "slots": set(), "bad": False})
+                slot = _normalize_datetime(record.start_time)
+                if (slot in bucket["slots"] or slot.minute not in (0, 15, 30, 45)
+                        or slot.second or slot.microsecond or
+                        _normalize_datetime(record.end_time)-slot != timedelta(minutes=15)):
+                    bucket["bad"] = True
+                bucket["slots"].add(slot)
                 bucket["count"] += 1
                 bucket["vt" if record.is_vt else "nt"] += self._interval_cost(
                     record, record.is_vt
@@ -374,21 +378,27 @@ class PndStatisticsManager:
                 hour: Decimal(str(round(bucket["vt"], 4)))
                 + Decimal(str(round(bucket["nt"], 4)))
                 for hour, bucket in hourly.items()
-                if bucket["count"] == REQUIRED_INTERVALS_PER_HOUR
+                if bucket["count"] == REQUIRED_INTERVALS_PER_HOUR and not bucket["bad"]
             }
             if total_hourly:
-                await self._async_import_total_cost_hours(total_hourly)
+                summary[STATISTIC_COST_TOTAL] = await self._async_import_total_cost_hours(total_hourly)
+            else:
+                summary[STATISTIC_COST_TOTAL] = dict(complete=0, submitted=0)
+        for counts in summary.values():
+            counts["expected"] = expected or counts["complete"]
+            counts["skipped"] = counts["expected"] - counts["complete"]
+        return summary
 
     async def _async_import_total_cost_hours(
         self, hourly_costs: Dict[datetime, Decimal]
-    ) -> None:
+    ) -> dict:
         """Import paired hourly costs through the established merge/backfill path."""
         quarters = [
             _CostQuarter(hour + timedelta(minutes=15 * index), float(cost / 4))
             for hour, cost in sorted(hourly_costs.items())
             for index in range(REQUIRED_INTERVALS_PER_HOUR)
         ]
-        await self._async_import_single_statistic(
+        return await self._async_import_single_statistic(
             self._get_statistic_id(STATISTIC_COST_TOTAL),
             f"ČEZ PND Celkové náklady ({mask_ean(self.ean)})",
             quarters,
@@ -475,12 +485,9 @@ class PndStatisticsManager:
         """Resolve a period by the interval's local calendar date."""
         timestamp = record.start_time
         if timestamp.tzinfo is not None:
-            try:
-                import homeassistant.util.dt as dt_util
+            from .coverage import ZONE
 
-                timestamp = dt_util.as_local(timestamp)
-            except (ImportError, AttributeError):
-                pass
+            timestamp = timestamp.astimezone(ZONE)
         return price_period_for(self.price_schedule, timestamp)
 
     def _price_currency(self) -> str:
@@ -592,14 +599,17 @@ class PndStatisticsManager:
         unit_class: Optional[str] = "energy",
         unit_of_measurement: Optional[str] = UOM_KWH,
         value_label: str = "kWh",
-    ) -> None:
+    ) -> dict:
         """Import single statistic stream with deterministic hourly aggregation, baseline sum, merge, and backfill shift."""
+        summary = dict(complete=0, submitted=0)
         if not intervals:
-            return
+            return summary
 
         # 1. Deterministic aggregation of valid 15-minute intervals into 1-hour UTC buckets
         hourly_deltas: Dict[datetime, float] = {}
         hourly_interval_counts: Dict[datetime, int] = {}
+        seen_slots = set()
+        rejected_hours = set()
         for record in intervals:
             # Skip invalid intervals for this specific statistic stream
             if validity_fn is not None and not validity_fn(record):
@@ -612,6 +622,13 @@ class PndStatisticsManager:
 
             r_dt = _normalize_datetime(record.start_time)
             hour_dt = r_dt.replace(minute=0, second=0, microsecond=0)
+            if (r_dt in seen_slots or r_dt.minute not in (0, 15, 30, 45)
+                    or r_dt.second or r_dt.microsecond
+                    or (hasattr(record, "end_time") and
+                        _normalize_datetime(record.end_time)-r_dt != timedelta(minutes=15))):
+                rejected_hours.add(hour_dt)
+                continue
+            seen_slots.add(r_dt)
             delta = float(delta_fn(record))
             hourly_deltas[hour_dt] = round(hourly_deltas.get(hour_dt, 0.0) + delta, 6)
             hourly_interval_counts[hour_dt] = hourly_interval_counts.get(hour_dt, 0) + 1
@@ -619,7 +636,7 @@ class PndStatisticsManager:
         # Completeness policy: omit hours with != 4 valid intervals
         incomplete_hours = [
             h for h, count in hourly_interval_counts.items()
-            if count != REQUIRED_INTERVALS_PER_HOUR
+            if count != REQUIRED_INTERVALS_PER_HOUR or h in rejected_hours
         ]
         for h in incomplete_hours:
             _LOGGER.warning(
@@ -630,8 +647,9 @@ class PndStatisticsManager:
             )
             del hourly_deltas[h]
 
+        summary["complete"] = len(hourly_deltas)
         if not hourly_deltas:
-            return
+            return summary
 
         sorted_batch_hours = sorted(hourly_deltas.keys())
         min_start_dt = sorted_batch_hours[0]
@@ -774,6 +792,7 @@ class PndStatisticsManager:
             )
 
             async_add_external_statistics(self.hass, metadata, statistic_data_objects)
+            summary["submitted"] = len(hourly_deltas)
             min_t = stats_payload[0]["start"] if stats_payload else None
             max_t = stats_payload[-1]["start"] if stats_payload else None
             min_str = min_t.strftime("%Y-%m-%d %H:%M") if hasattr(min_t, "strftime") else str(min_t)
@@ -803,10 +822,12 @@ class PndStatisticsManager:
             )
             if hasattr(self.hass, "async_add_external_statistics") and callable(self.hass.async_add_external_statistics):
                 res = self.hass.async_add_external_statistics(statistic_id, stats_payload)
+                summary["submitted"] = len(hourly_deltas)
                 if asyncio.iscoroutine(res):
                     await res
             elif hasattr(self.hass, "async_import_statistics") and callable(self.hass.async_import_statistics):
                 res = self.hass.async_import_statistics(statistic_id, stats_payload)
+                summary["submitted"] = len(hourly_deltas)
                 if asyncio.iscoroutine(res):
                     await res
         except Exception as err:
@@ -816,3 +837,4 @@ class PndStatisticsManager:
                 type(err).__name__,
             )
             raise PndStatisticsError(f"Chyba při importu statistik pro {statistic_id}: {type(err).__name__}") from err
+        return summary

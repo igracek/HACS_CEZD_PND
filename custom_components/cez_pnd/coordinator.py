@@ -1,6 +1,6 @@
 """DataUpdateCoordinator for CEZ Distribuce PND integration."""
 import asyncio
-from datetime import datetime, time as dt_time, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 import logging
 import os
 import shutil
@@ -73,7 +73,10 @@ from .const import (
     mask_ean,
     mask_elm,
 )
-from .models import SyncResult
+from .models import SyncResult, DailySummary
+from dataclasses import asdict
+from .coverage import assess, ZONE
+from homeassistant.helpers.storage import Store
 from .parser import PndCsvParser
 from .statistics import PndStatisticsManager
 from .tariff import TariffEvaluator
@@ -558,6 +561,15 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         self._unsub_schedule: Optional[Callable[[], None]] = None
         self._unsub_retry: Optional[Callable[[], None]] = None
         self._retry_scheduled: bool = False
+        self.pending_dates = {}
+        self.expired_dates = []
+        self.last_complete_summary = None
+        self._pending_loaded = False
+        self._pending_store = Store(hass, 1, f"{DOMAIN}_pending_{entry.entry_id}")
+        self._unsub_partial = None
+        self._schedules_stopped = False
+        self._range_running = False
+        self._daily_refresh_pending = False
 
         self.billing_start_date: Optional[str] = None
         self.billing_consumption: Optional[float] = None
@@ -679,6 +691,8 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
 
     def setup_daily_schedule(self) -> None:
         """Register daily scheduled time tracker."""
+        if self._schedules_stopped:
+            return
         if self._unsub_schedule:
             self._unsub_schedule()
             self._unsub_schedule = None
@@ -698,6 +712,8 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         )
 
         async def _scheduled_tick(_now: datetime) -> None:
+            if self._schedules_stopped:
+                return
             _LOGGER.info("Starting scheduled daily synchronization for EAN %s", self.masked_ean)
             await self.async_request_refresh()
 
@@ -717,6 +733,8 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
 
     def cancel_schedule(self) -> None:
         """Cancel scheduled time tracker and any pending retry callbacks (SEC04-05)."""
+        self._schedules_stopped = True
+        self._daily_refresh_pending = False
         if self._unsub_schedule:
             self._unsub_schedule()
             self._unsub_schedule = None
@@ -724,9 +742,102 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             self._unsub_retry()
             self._unsub_retry = None
         self._retry_scheduled = False
+        if self._unsub_partial:
+            self._unsub_partial()
+            self._unsub_partial = None
+
+    async def _load_pending(self):
+        if not self._pending_loaded:
+            state = await self._pending_store.async_load() or {}
+            self.pending_dates = state.get("dates", {})
+            self.expired_dates = state.get("expired", [])[-7:]
+            if state.get("daily"):
+                daily = dict(state["daily"])
+                daily["date"] = datetime.fromisoformat(daily["date"])
+                self.last_complete_summary = DailySummary(**daily)
+            self._pending_loaded = True
+            self._schedule_partial()
+
+    async def _save_pending(self):
+        today = datetime.now(ZONE).date()
+        expired = [key for key in self.pending_dates
+                   if not 0 < (today-date.fromisoformat(key)).days <= 7]
+        if expired:
+            _LOGGER.warning("PND incomplete dates expired without repair: %s", ", ".join(sorted(expired)))
+        self.expired_dates = sorted(set(self.expired_dates+expired))[-7:]
+        for key in expired:
+            self.pending_dates.pop(key)
+        daily = asdict(self.last_complete_summary) if self.last_complete_summary else None
+        if daily:
+            daily["date"] = daily["date"].isoformat()
+        await self._pending_store.async_save(dict(dates=self.pending_dates, expired=self.expired_dates, daily=daily))
+
+    def _schedule_partial(self):
+        if self._schedules_stopped:
+            return
+        if self._unsub_partial:
+            self._unsub_partial()
+            self._unsub_partial = None
+        now = datetime.now(ZONE)
+        due = [item["next"] for key, item in self.pending_dates.items()
+               if item["attempts"] < 6 and 0 < (now.date()-date.fromisoformat(key)).days <= 7]
+        if due:
+            self._unsub_partial = async_call_later(self.hass, max(60, min(due)-now.timestamp()), self._retry_partial)
+
+    async def _retry_partial(self, _now=None):
+        if self._schedules_stopped:
+            return
+        self._unsub_partial = None
+        now = datetime.now(ZONE)
+        if self.is_running:
+            self._schedule_partial()
+            return
+        eligible = [(key, item) for key, item in self.pending_dates.items()
+                    if item["attempts"] < 6 and item["next"] <= now.timestamp()
+                    and 0 < (now.date()-date.fromisoformat(key)).days <= 7]
+        if not eligible:
+            self._schedule_partial()
+            return
+        key, item = min(eligible, key=lambda pair: pair[1]["next"])
+        item["attempts"] += 1
+        item["next"] = now.timestamp() + (7200 if item["attempts"] == 1 else 21600)
+        await self._save_pending()
+        try:
+            if self._schedules_stopped:
+                return
+            await self.async_fetch_range(f"{key} - {key}")
+        except HomeAssistantError:
+            if self.last_sync_result and self.last_sync_result.error_code in (ERR_AUTH, ERR_CAPTCHA, ERR_LOCKED):
+                item["attempts"] = 6
+                await self._save_pending()
+        finally:
+            self._schedule_partial()
+
+    async def _complete_result(self, parsed, days, summary):
+        coverage = parsed.coverage
+        complete = all(c["complete"] for profiles in coverage.values() for c in profiles.values())
+        submitted = sum(c.get("submitted", 0) for c in summary.values())
+        status = "OK" if complete and submitted else (
+            "PARTIAL" if any(c["valid"] for p in coverage.values() for c in p.values()) else "INCOMPLETE")
+        now = datetime.now(ZONE)
+        for day in days:
+            key = day.isoformat()
+            if all(c["complete"] for c in coverage[key].values()) and submitted:
+                self.pending_dates.pop(key, None)
+            elif 0 < (now.date()-day).days <= 7:
+                self.pending_dates.setdefault(key, {"attempts": 0, "next": now.timestamp()+1800})
+        if status == "OK" and len(days) == 1 and parsed.daily_summary:
+            if self.last_complete_summary is None or days[0].isoformat() >= self.last_complete_summary.date.strftime("%Y-%m-%d"):
+                parsed.daily_summary.date = datetime.combine(days[0], dt_time())
+                self.last_complete_summary = parsed.daily_summary
+        await self._save_pending()
+        self._schedule_partial()
+        return status
 
     async def _async_retry_maintenance(self, _now: Optional[datetime] = None) -> None:
         """Retry synchronization after portal maintenance."""
+        if self._schedules_stopped:
+            return
         self._unsub_retry = None
         self._retry_scheduled = False
         _LOGGER.info("Spouštím odložený pokus o synchronizaci PND po údržbě pro EAN %s", self.masked_ean)
@@ -748,6 +859,8 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
     async def _async_update_data(self) -> SyncResult:
         """Fetch yesterday's data from CEZ PND and process pipeline under global semaphore."""
         if self.is_running:
+            if self._range_running and not self._schedules_stopped:
+                self._daily_refresh_pending = True
             _LOGGER.warning("Synchronizace pro EAN %s již probíhá, přeskakuji.", self.masked_ean)
             if self.last_sync_result:
                 return self.last_sync_result
@@ -759,6 +872,9 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         deadline = time.monotonic() + 175.0
         ownership: Optional[BrowserWorkerOwnership] = None
         downloaded_paths: Optional[Dict[str, object]] = None
+
+        await self._load_pending()
+        target_days = [datetime.now(ZONE).date()-timedelta(days=1)]
 
         await GLOBAL_BROWSER_SEMAPHORE.acquire()
         try:
@@ -800,6 +916,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                 )
 
                 _LOGGER.debug("Evaluating VT/NT tariff classification for %d intervals", len(parsed_data.intervals))
+                assess(parsed_data, target_days)
                 await self.tariff_evaluator.async_evaluate(parsed_data.intervals)
 
                 if parsed_data.daily_summary and parsed_data.intervals:
@@ -811,16 +928,20 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     parsed_data.daily_summary.vt_ratio_percent = round((vt_kwh / tot_kwh * 100.0) if tot_kwh > 0 else 100.0, 1)
 
                 _LOGGER.debug("Importing %d intervals to HA long-term statistics", len(parsed_data.intervals))
-                await self.stats_manager.async_import(parsed_data)
+                import_summary = await self.stats_manager.async_import(parsed_data)
+                status = await self._complete_result(parsed_data, target_days, import_summary)
                 await self._async_calculate_billing_consumption()
 
                 duration = round(time.time() - start_time, 2)
                 self.last_sync_time = datetime.now()
                 sync_result = SyncResult(
                     intervals=parsed_data.intervals,
-                    daily_summary=parsed_data.daily_summary,
+                    daily_summary=self.last_complete_summary,
                     duration_seconds=duration,
-                    status="OK",
+                    status=status,
+                    target_dates=[d.isoformat() for d in target_days],
+                    coverage=parsed_data.coverage,
+                    import_summary=import_summary,
                     records_count=len(parsed_data.intervals),
                     debug_artifacts_created=list(self.scraper.last_debug_artifacts),
                 )
@@ -838,6 +959,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             self.last_sync_result = SyncResult(
                 duration_seconds=duration,
                 status="Error",
+                daily_summary=self.last_complete_summary,
                 error_message=err_msg,
                 error_code=ERR_TIMEOUT,
                 debug_artifacts_created=list(self.scraper.last_debug_artifacts),
@@ -857,7 +979,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
 
             if isinstance(err, PndMaintenanceError):
                 _LOGGER.warning("Portál ČEZ PND prochází údržbou. Plánuji automatický opakovaný pokus za 60 minut.")
-                if not self._retry_scheduled:
+                if not self._retry_scheduled and not self._schedules_stopped:
                     self._retry_scheduled = True
                     self._unsub_retry = async_call_later(self.hass, 3600, self._async_retry_maintenance)
 
@@ -867,6 +989,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             self.last_sync_result = SyncResult(
                 duration_seconds=duration,
                 status="Error",
+                daily_summary=self.last_complete_summary,
                 error_message=err_msg,
                 error_code=err_code,
                 debug_artifacts_created=list(self.scraper.last_debug_artifacts),
@@ -904,9 +1027,13 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         ownership: Optional[BrowserWorkerOwnership] = None
         downloaded_paths: Optional[Dict[str, object]] = None
 
+        await self._load_pending()
+        target_days = [datetime.now(ZONE).date()-timedelta(days=1)]
+
         await GLOBAL_BROWSER_SEMAPHORE.acquire()
         try:
             temp_dir = tempfile.mkdtemp(prefix="cez_pnd_range_")
+            self._range_running = True
             ownership = BrowserWorkerOwnership(
                 semaphore=GLOBAL_BROWSER_SEMAPHORE,
                 temp_dir=temp_dir,
@@ -921,6 +1048,14 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                 hass_cfg = self._get_hass_config_path()
                 self.scraper = self._get_client()
 
+                def requested_date(value):
+                    value = value.strip()
+                    return datetime.strptime(value, "%d.%m.%Y").date() if "." in value else date.fromisoformat(value)
+                bounds = date_range.split(" - ")
+                first, last = requested_date(bounds[0]), requested_date(bounds[-1])
+                target_days = [first + timedelta(days=i) for i in range((last-first).days+1)]
+                if not target_days:
+                    raise ValueError("Invalid requested dates")
                 _LOGGER.info("Fetching custom date range '%s' for EAN %s", date_range, self.masked_ean)
                 worker_future = self.hass.async_add_executor_job(
                     self.scraper.download_custom_range,
@@ -943,6 +1078,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     downloaded_paths if isinstance(downloaded_paths, dict) else None,
                 )
 
+                assess(parsed_data, target_days)
                 await self.tariff_evaluator.async_evaluate(parsed_data.intervals)
 
                 if parsed_data.daily_summary and parsed_data.intervals:
@@ -953,15 +1089,19 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     parsed_data.daily_summary.consumption_nt_kwh = round(nt_kwh, 4)
                     parsed_data.daily_summary.vt_ratio_percent = round((vt_kwh / tot_kwh * 100.0) if tot_kwh > 0 else 100.0, 1)
 
-                await self.stats_manager.async_import(parsed_data)
+                import_summary = await self.stats_manager.async_import(parsed_data)
+                status = await self._complete_result(parsed_data, target_days, import_summary)
 
                 duration = round(time.time() - start_time, 2)
                 self.last_sync_time = datetime.now()
                 sync_result = SyncResult(
                     intervals=parsed_data.intervals,
-                    daily_summary=parsed_data.daily_summary,
+                    daily_summary=self.last_complete_summary,
                     duration_seconds=duration,
-                    status="OK",
+                    status=status,
+                    target_dates=[d.isoformat() for d in target_days],
+                    coverage=parsed_data.coverage,
+                    import_summary=import_summary,
                     records_count=len(parsed_data.intervals),
                     debug_artifacts_created=list(self.scraper.last_debug_artifacts),
                 )
@@ -980,6 +1120,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             self.last_sync_result = SyncResult(
                 duration_seconds=duration,
                 status="Error",
+                daily_summary=self.last_complete_summary,
                 error_message=err_msg,
                 error_code=ERR_TIMEOUT,
                 debug_artifacts_created=list(self.scraper.last_debug_artifacts),
@@ -1001,6 +1142,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             self.last_sync_result = SyncResult(
                 duration_seconds=duration,
                 status="Error",
+                daily_summary=self.last_complete_summary,
                 error_message=err_msg,
                 error_code=err_code,
                 debug_artifacts_created=list(self.scraper.last_debug_artifacts),
@@ -1021,6 +1163,18 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     await _async_safe_remove_dir(self.hass, temp_dir)
                 GLOBAL_BROWSER_SEMAPHORE.release()
             self.async_update_listeners()
+
+            self._range_running = False
+            if self._daily_refresh_pending and not self._schedules_stopped:
+                # Coalesce ticks while the range owns the pipeline. Clear before
+                # awaiting so an error/reentrant refresh cannot replay forever.
+                self._daily_refresh_pending = False
+                try:
+                    # Run after ownership release, not through the daily tick's
+                    # still-active debounce cooldown (which could outlive unload).
+                    await self.async_refresh()
+                except HomeAssistantError as err:
+                    _LOGGER.warning("Deferred daily PND refresh failed: %s", err)
 
     async def async_test_export_scenarios(self) -> Dict[str, Any]:
         """Probe HTTP export scenarios without parsing or importing statistics."""
