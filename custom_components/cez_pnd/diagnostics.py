@@ -55,10 +55,10 @@ _SBOM_ROLES = {
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _HISTORICAL_SNAPSHOT_APPLICATION = {
     "type": "application",
-    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.1.9",
+    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.1.10",
     "name": "HACS_CEZD_PND",
-    "version": "1.1.9",
-    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.1.9",
+    "version": "1.1.10",
+    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.1.10",
 }
 _EXPECTED_SBOM_CLOSURE = {
     "attrs": ("26.1.0", "shared_with_ha_core"),
@@ -73,7 +73,7 @@ _EXPECTED_SBOM_CLOSURE = {
     "selenium": ("4.49.0", "integration_direct"),
     "sniffio": ("1.3.1", "integration_transitive"),
     "sortedcontainers": ("2.4.0", "integration_transitive"),
-    "soupsieve": ("2.9.2", "integration_transitive"),
+    "soupsieve": ("4.1.3", "integration_transitive"),
     "trio": ("0.34.0", "integration_transitive"),
     "trio-websocket": ("0.12.2", "integration_transitive"),
     "typing-extensions": ("4.16.0", "shared_with_ha_core"),

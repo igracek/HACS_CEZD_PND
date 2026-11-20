@@ -1,7 +1,7 @@
 # Release dependency verification
 
 Tyto soubory popisují ověřovací baseline pro **Home Assistant Core 2026.10.4,
-CPython 3.14 a Linux**, vyřešenou dne 2026-10-26. Nejde o instalační lock,
+CPython 3.14 a Linux**, vyřešenou dne 2026-11-20. Nejde o instalační lock,
 který by měl Home Assistant použít místo svého sdíleného resolveru.
 
 Minimální podporovaná a otestovaná verze HA je **2026.10.4** (shodně v obou
@@ -18,7 +18,7 @@ Provenance HA 2026.10.4 je připnuta na veřejný commit
 Gate kontroluje SHA-256 jeho `pyproject.toml` a
 `homeassistant/package_constraints.txt`, verzi HA, Python `>=3.14.2` a pin
 `requests==2.34.2`; PyPI metadata následně ověřují celý aktivní graf.
-Diagnostika porovnává instalované verze se snapshotem pro aplikaci **1.1.9**,
+Diagnostika porovnává instalované verze se snapshotem pro aplikaci **1.1.10**,
 ale neprovádí živý OSV dotaz a netvrdí budoucí bezpečnost.
 
 - `requirements.in` přesně pinuje dva kořeny vlastněné integrací a

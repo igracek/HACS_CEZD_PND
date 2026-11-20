@@ -1248,6 +1248,7 @@ class PndHttpClient:
         stop_event: Optional[threading.Event] = None,
         deadline: Optional[float] = None,
         selector_mode: Optional[str] = None,
+        optional: bool = False,
     ) -> str:
         """Download and atomically store a bounded, validated CSV response."""
         strict_selector = selector_mode is not None
@@ -1376,12 +1377,18 @@ class PndHttpClient:
                 report_kind=report_kind, declared_bytes=declared_bytes, bytes=total)
 
             if total == 0:
+                if optional:
+                    raise PndReportUnavailableError("Optional report response is empty (ERR_PORTAL)")
                 raise PndPortalError("Report response is empty (ERR_PORTAL)")
             signature = bytes(prefix).lstrip(b"\xef\xbb\xbf\x00\t\r\n ").lower()
             if signature.startswith((b"<!doctype html", b"<html", b"<?xml")):
                 raise PndPortalError("Report response contains markup, not CSV (ERR_PORTAL)")
             first_line = signature.splitlines()[0] if signature else b""
             if b";" not in first_line and b"," not in first_line:
+                if optional:
+                    raise PndReportUnavailableError(
+                        "Optional report response lacks a CSV delimiter (ERR_PORTAL)"
+                    )
                 raise PndPortalError("Report response lacks a CSV delimiter (ERR_PORTAL)")
 
             if self._validate_download_directory(download_dir) != directory_identity:
@@ -1738,9 +1745,11 @@ class PndHttpClient:
                 range_prod = self._fetch_csv_report(
                     session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
                     id_device_set=id_device_set, date_from=yesterday, date_to=today,
-                    stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario
+                    stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario,
+                    optional=True,
                 )
             except PndReportUnavailableError:
+                _LOGGER.warning("Range production report unavailable for this EAN (consumption-only); skipping")
                 range_prod = ""
 
             # 3. Download Daily Consumption (+A) - idAssembly -1021
@@ -1757,9 +1766,11 @@ class PndHttpClient:
                 daily_prod = self._fetch_csv_report(
                     session, download_dir, "daily-production.csv", ASSEMBLY_DAILY_PRODUCTION,
                     id_device_set=id_device_set, date_from=yesterday, date_to=yesterday,
-                    stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario
+                    stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario,
+                    optional=True,
                 )
             except PndReportUnavailableError:
+                _LOGGER.warning("Daily production report unavailable for this EAN (consumption-only); skipping")
                 daily_prod = ""
 
             # Validate mandatory consumption report
@@ -1824,12 +1835,17 @@ class PndHttpClient:
                 stop_event=stop_event, deadline=deadline
             )
 
-            self._debug_operation_phase("custom_range_production")
-            range_prod = self._fetch_csv_report(
-                session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
-                id_device_set=id_device_set, date_from=date_from, date_to=date_to,
-                stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario
-            )
+            try:
+                self._debug_operation_phase("custom_range_production")
+                range_prod = self._fetch_csv_report(
+                    session, download_dir, "range-production.csv", ASSEMBLY_RANGE_PRODUCTION,
+                    id_device_set=id_device_set, date_from=date_from, date_to=date_to,
+                    stop_event=stop_event, deadline=deadline, selector_mode=selected_scenario,
+                    optional=True,
+                )
+            except PndReportUnavailableError:
+                _LOGGER.warning("Custom range production report unavailable for this EAN (consumption-only); skipping")
+                range_prod = ""
 
             if not os.path.exists(range_cons):
                 raise PndPortalError("Mandatory range consumption report download failed (ERR_PORTAL)")

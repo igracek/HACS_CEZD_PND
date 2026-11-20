@@ -38,7 +38,7 @@ BASELINE = {
     "home_assistant": "2026.10.4",
     "python": "3.14",
     "platform": "linux",
-    "resolved_at": "2026-10-26",
+    "resolved_at": "2026-11-20",
 }
 DIRECT_ROLES = {"integration_direct", "ha_core_provided"}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -47,10 +47,10 @@ EXPECTED_INTEGRATION_ROOTS = {"beautifulsoup4": "4.15.0", "selenium": "4.49.0"}
 EXPECTED_HA_ROOTS = {"requests": "2.34.2"}
 EXPECTED_APPLICATION = {
     "type": "application",
-    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.1.9",
+    "bom-ref": "pkg:github/igracek/HACS_CEZD_PND@1.1.10",
     "name": "HACS_CEZD_PND",
-    "version": "1.1.9",
-    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.1.9",
+    "version": "1.1.10",
+    "purl": "pkg:github/igracek/HACS_CEZD_PND@1.1.10",
 }
 EXPECTED_CLOSURE = {
     "attrs": "26.1.0",
@@ -65,7 +65,7 @@ EXPECTED_CLOSURE = {
     "selenium": "4.49.0",
     "sniffio": "1.3.1",
     "sortedcontainers": "2.4.0",
-    "soupsieve": "2.9.2",
+    "soupsieve": "4.1.3",
     "trio": "0.34.0",
     "trio-websocket": "0.12.2",
     "typing-extensions": "4.16.0",

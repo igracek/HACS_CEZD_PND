@@ -1058,23 +1058,32 @@ class PndCsvParser:
             app_version=self.app_version,
         )
 
-        # Diagnostic validation of interval count
+        # Diagnostic validation of interval count (DST-aware per local date)
         num_intervals = len(interval_records)
         target_name = os.path.basename(
             consumption_file.logical_name if isinstance(consumption_file, SealedReport) else consumption_file
         )
-        if num_intervals not in (96, 92, 100) and num_intervals % 96 != 0 and num_intervals > 0:
+        expected_intervals = sum(
+            len(day_grid(day))
+            for day in {
+                (r.start_time.astimezone(ZONE).date() if r.start_time.tzinfo else r.start_time.date())
+                for r in interval_records
+            }
+        )
+        if num_intervals > 0 and num_intervals != expected_intervals:
             _LOGGER.warning(
-                "Neočekávaný počet 15min intervalů v %s: získáno %d, očekáváno 96 (resp. 92/100 při DST nebo násobek pro období). "
+                "Neočekávaný počet 15min intervalů v %s: získáno %d, očekáváno %d. "
                 "ČEZ PND pravděpodobně ještě nedopočítal data za celý den.",
                 target_name,
                 num_intervals,
+                expected_intervals,
             )
         else:
             _LOGGER.debug("Parsed %d 15-minute intervals successfully from %s", num_intervals, target_name)
 
         return ParsedPndData(
             raw_slots=self.raw_slots,
+            has_production=bool(self.raw_slots.get("-A")),
             intervals=interval_records,
             daily_summary=daily_summary,
             detected_encoding=self.detected_encoding,

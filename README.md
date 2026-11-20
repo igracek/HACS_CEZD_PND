@@ -8,6 +8,12 @@ Nativní HACS integrace pro Home Assistant (vyvinuto pro **Home Assistant 2026.1
 
 ![Logo integrace](custom_components/cez_pnd/brand/logo.png)
 
+## Novinky ve verzi 1.1.10
+
+- Podpora odběrných míst bez výroby/dodávky (-A): chybějící nebo prázdná volitelná sestava výroby už neblokuje dokončení odběrného místa.
+- Oprava validace počtu intervalů u vícedenních exportů přes přechod standardního a letního času (použití skutečného počtu čtvrthodin pro jednotlivé dny místo pevného násobku 96).
+- Automatické omezené opakování (max. 2 pokusy) při dočasném timeoutu relace (`ERR_TIMEOUT`) během stahování dat.
+
 ## Novinky ve verzi 1.1.9
 
 - Oprava časové identity intervalů při změně letního a zimního času: koncové značky se rozlišují před deduplikací a hodinové statistiky zachovávají UTC identitu.

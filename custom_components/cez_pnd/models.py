@@ -48,6 +48,7 @@ class ParsedPndData:
     duplicate_rows_count: int = 0
     coverage: dict = field(default_factory=dict)
     raw_slots: dict = field(default_factory=dict, repr=False)
+    has_production: bool = True
 
 
 @dataclass

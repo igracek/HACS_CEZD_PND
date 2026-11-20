@@ -2096,7 +2096,7 @@ class PndScraperClient:
             # SEC10-02 (CWE-252, CWE-682): Validate mandatory historical report downloads
             if not _report_is_ready(range_cons):
                 raise PndScraperError("Mandatory historical report download failed: range-consumption.csv (ERR_SCRAPER)")
-            if not _report_is_ready(range_prod):
+            if range_prod and not _report_is_ready(range_prod):
                 raise PndScraperError("Mandatory historical report download failed: range-production.csv (ERR_SCRAPER)")
 
             result = {

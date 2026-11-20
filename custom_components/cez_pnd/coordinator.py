@@ -570,6 +570,9 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         self._schedules_stopped = False
         self._range_running = False
         self._daily_refresh_pending = False
+        self.has_production: Optional[bool] = None
+        self._timeout_retries_date: Optional[date] = None
+        self._timeout_retries_count: int = 0
 
         self.billing_start_date: Optional[str] = None
         self.billing_consumption: Optional[float] = None
@@ -751,10 +754,14 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             state = await self._pending_store.async_load() or {}
             self.pending_dates = state.get("dates", {})
             self.expired_dates = state.get("expired", [])[-7:]
+            if "has_production" in state:
+                self.has_production = state["has_production"]
             if state.get("daily"):
                 daily = dict(state["daily"])
                 daily["date"] = datetime.fromisoformat(daily["date"])
                 self.last_complete_summary = DailySummary(**daily)
+                if self.has_production is None and self.last_complete_summary.total_production_kwh > 0:
+                    self.has_production = True
             self._pending_loaded = True
             self._schedule_partial()
 
@@ -770,7 +777,12 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
         daily = asdict(self.last_complete_summary) if self.last_complete_summary else None
         if daily:
             daily["date"] = daily["date"].isoformat()
-        await self._pending_store.async_save(dict(dates=self.pending_dates, expired=self.expired_dates, daily=daily))
+        await self._pending_store.async_save(dict(
+            dates=self.pending_dates,
+            expired=self.expired_dates,
+            daily=daily,
+            has_production=self.has_production,
+        ))
 
     def _schedule_partial(self):
         if self._schedules_stopped:
@@ -916,7 +928,12 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                 )
 
                 _LOGGER.debug("Evaluating VT/NT tariff classification for %d intervals", len(parsed_data.intervals))
-                assess(parsed_data, target_days)
+                if getattr(parsed_data, "has_production", False) is True or (
+                    parsed_data.daily_summary and getattr(parsed_data.daily_summary, "total_production_kwh", 0) > 0
+                ):
+                    self.has_production = True
+                require_prod = bool(self.has_production or getattr(parsed_data, "has_production", True))
+                assess(parsed_data, target_days, require_production=require_prod)
                 await self.tariff_evaluator.async_evaluate(parsed_data.intervals)
 
                 if parsed_data.daily_summary and parsed_data.intervals:
@@ -946,6 +963,7 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     debug_artifacts_created=list(self.scraper.last_debug_artifacts),
                 )
                 self.last_sync_result = sync_result
+                self._timeout_retries_count = 0
                 self._clear_identity_problem()
                 return sync_result
 
@@ -956,6 +974,18 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
             self.last_sync_time = datetime.now()
             err_msg = _map_error_code_to_message(ERR_TIMEOUT)
             _LOGGER.error("PND synchronizace pro EAN %s překročila časový limit (%s)", self.masked_ean, ERR_TIMEOUT)
+            today = datetime.now(ZONE).date()
+            if self._timeout_retries_date != today:
+                self._timeout_retries_date = today
+                self._timeout_retries_count = 0
+            if not self._retry_scheduled and not self._schedules_stopped and self._timeout_retries_count < 2:
+                self._timeout_retries_count += 1
+                self._retry_scheduled = True
+                _LOGGER.warning(
+                    "Portál ČEZ PND překročil časový limit (%d/2). Plánuji automatický opakovaný pokus za 60 minut.",
+                    self._timeout_retries_count,
+                )
+                self._unsub_retry = async_call_later(self.hass, 3600, self._async_retry_maintenance)
             self.last_sync_result = SyncResult(
                 duration_seconds=duration,
                 status="Error",
@@ -1078,7 +1108,12 @@ class CezPndCoordinator(DataUpdateCoordinator[SyncResult]):
                     downloaded_paths if isinstance(downloaded_paths, dict) else None,
                 )
 
-                assess(parsed_data, target_days)
+                if getattr(parsed_data, "has_production", False) is True or (
+                    parsed_data.daily_summary and getattr(parsed_data.daily_summary, "total_production_kwh", 0) > 0
+                ):
+                    self.has_production = True
+                require_prod = bool(self.has_production or getattr(parsed_data, "has_production", True))
+                assess(parsed_data, target_days, require_production=require_prod)
                 await self.tariff_evaluator.async_evaluate(parsed_data.intervals)
 
                 if parsed_data.daily_summary and parsed_data.intervals:

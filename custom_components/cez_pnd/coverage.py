@@ -28,17 +28,19 @@ def utc_end(value):
     return result
 
 
-def assess(parsed, days):
+def assess(parsed, days, *, require_production=None):
     """Attach per-day/profile counts and constrain records to the UTC grid.
 
     Naive repeated autumn times have no proven portal fold contract: omit them
     and leave that day incomplete. Do not collapse them into a measured hour.
     """
+    need_prod = getattr(parsed, 'has_production', True) if require_production is None else bool(require_production)
+    active_profiles = ('+A', '-A') if need_prod else ('+A',)
     grids = {day.isoformat(): day_grid(day) for day in days}
     coverage = {}
     for key, grid in grids.items():
         profiles = coverage.setdefault(key, {})
-        for profile in ('+A', '-A'):
+        for profile in active_profiles:
             counts = dict(expected=len(grid), raw=0, valid=0, unknown=0,
                           invalid=0, missing=len(grid), duplicate=0,
                           out_of_range=0, ambiguous=0)
